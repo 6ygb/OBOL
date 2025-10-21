@@ -189,6 +189,7 @@ task("obol:deploy", "Deploy tokens + oracle + markets via fixtures and save to O
   .addOptionalParam("relayer", "Rate relayer address (defaults to deployer)", undefined, types.string)
   .addOptionalParam("tokenUsd", "Pre-existing USD token address.", undefined, types.string)
   .addOptionalParam("tokenEur", "Pre-existing EUR token address.", undefined, types.string)
+  .addOptionalParam("oracle", "Pre-existing oracle address", undefined, types.string)
   .setAction(async function (_args: TaskArguments, hre) {
     const { ethers, deployments, getNamedAccounts, network, run } = hre;
     const { get, save, getArtifact, log } = deployments;
@@ -198,6 +199,7 @@ task("obol:deploy", "Deploy tokens + oracle + markets via fixtures and save to O
     const rateRelayer = _args.relayer ? ethers.getAddress(String(_args.relayer)) : signer.address;
     const providedUsd = _args.tokenUsd ? ethers.getAddress(String(_args.tokenUsd)) : undefined;
     const providedEur = _args.tokenEur ? ethers.getAddress(String(_args.tokenEur)) : undefined;
+    const providedOracle = _args.oracle ? ethers.getAddress(String(_args.oracle)) : undefined;
     const useProvidedTokens = Boolean(providedUsd && providedEur);
 
     console.log("Deploying ConfLend ...");
@@ -206,6 +208,14 @@ task("obol:deploy", "Deploy tokens + oracle + markets via fixtures and save to O
     console.log(`Rate relayer: ${rateRelayer}`);
     if (useProvidedTokens) {
       console.log(`Using provided token addresses -> USD: ${providedUsd}, EUR: ${providedEur}`);
+    }
+    if (providedOracle) {
+      console.log(`Using provided oracle address -> ${providedOracle}`);
+    }
+
+    process.env.RATE_RELAYER = rateRelayer;
+    if (providedOracle) {
+      process.env.OBOL_ORACLE = providedOracle;
     }
 
     if (useProvidedTokens) {
@@ -222,7 +232,13 @@ task("obol:deploy", "Deploy tokens + oracle + markets via fixtures and save to O
     } else {
       await run("deploy", { tags: "tokens" });
     }
-    await run("deploy", { tags: "oracle" });
+
+    if (providedOracle) {
+      const oracleAbi = (await getArtifact("ObolPriceOracle")).abi;
+      await save("ObolPriceOracle", { address: providedOracle, abi: oracleAbi });
+    } else {
+      await run("deploy", { tags: "oracle" });
+    }
     await run("deploy", { tags: "markets" });
 
     // grab deployments
@@ -254,6 +270,24 @@ task("obol:deploy", "Deploy tokens + oracle + markets via fixtures and save to O
     log("Saved to OBOL.json");
   });
 
+task("obol:deploy_oracle", "Deploy oracle independently")
+  .addOptionalParam("relayer", "Price relayer address", undefined, types.string)
+  .setAction(async (_args, hre) => {
+    const { ethers } = hre;
+    const [signer] = await ethers.getSigners();
+
+    const priceRelayer = _args.relayer ? ethers.getAddress(String(_args.relayer)) : signer.address;
+    const oracleFactory = await ethers.getContractFactory("ObolPriceOracle", signer);
+    const oracleInstance = await oracleFactory.deploy(priceRelayer, 30 * 60);
+    await oracleInstance.waitForDeployment();
+    const oracleAddress = await oracleInstance.getAddress();
+    console.log("Oracle address :", oracleAddress);
+
+    writeCfg({
+      ORACLE_ADDRESS: oracleAddress,
+    });
+    console.log("Saved to OBOL.json");
+  });
 
 task("obol:set_defaults", "Patch OBOL.json defaults")
   .addOptionalParam("usd", "Token USD address", undefined, types.string)
@@ -658,7 +692,6 @@ task("obol:claim_liquidation", "Claim queued liquidation on a market.")
       `${collatSymbol} balance before : ${clearBalBefore}\n${collatSymbol} balance after : ${clearBalAfter}\n${collatSymbol} Seized : ${Number(clearBalAfter) - Number(clearBalBefore)}`,
     );
   });
-
 
 task("obol:pos", "Dump & decrypt your UserPos")
   .addParam("market", "EURtoUSD | USDtoEUR", undefined, types.string)

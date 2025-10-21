@@ -9,7 +9,15 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
   const eur = await get("TokenEUR");
   const usd = await get("TokenUSD");
-  const oracle = await get("ObolPriceOracle");
+
+  // 2) Resolve oracle address with override support:
+  // Priority: ENV (OBOL_ORACLE / ORACLE_ADDRESS) -> saved deployment
+  const envOracle = process.env.OBOL_ORACLE ?? process.env.ORACLE_ADDRESS;
+  const oracleAddr = envOracle ? ethers.getAddress(envOracle) : (await get("ObolPriceOracle")).address;
+
+  // 3) Resolve rate relayer with override support:
+  // Priority: ENV (RATE_RELAYER) -> deployer/signer
+  const rateRelayer = process.env.RATE_RELAYER ? ethers.getAddress(process.env.RATE_RELAYER) : signer.address;
 
   // Direction enum in contract:
   // 0 = EURtoUSD (collateral = EUR, debt = USD)
@@ -28,8 +36,8 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
         usd.address, // debt (USD)
         "oUSD", // oToken name
         "oUSD", // oToken symbol
-        oracle.address, // oracle
-        signer.address, // rateRelayer
+        oracleAddr, // oracle
+        rateRelayer, // rateRelayer
       ],
     });
     log(`ConfLendMarket_EURtoUSD deployed at ${mkt1.address}`);
@@ -50,8 +58,8 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
         eur.address, // debt (EUR)
         "oEUR", // oToken name
         "oEUR", // oToken symbol
-        oracle.address, // oracle
-        signer.address, // rateRelayer
+        oracleAddr, // oracle
+        rateRelayer, // rateRelayer
       ],
     });
     log(`ConfLendMarket_USDtoEUR deployed at ${mkt2.address}`);

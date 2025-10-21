@@ -1,7 +1,7 @@
 import type { DeployFunction } from "hardhat-deploy/types";
 import type { HardhatRuntimeEnvironment } from "hardhat/types";
 
-const FRESH_WINDOW = 30 * 60; // 30 minutes, same as your tests
+const FRESH_WINDOW = 30 * 60; 
 
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const { deployments, getNamedAccounts, ethers } = hre;
@@ -9,7 +9,6 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const { deployer } = await getNamedAccounts();
   const deployerAddr = (await ethers.getSigner(deployer)).address;
 
-  // Keep default values used in tests: ObolPriceOracle(deployer, 30*60)
   let oracle = await getOrNull("ObolPriceOracle");
   if (!oracle) {
     oracle = await deploy("ObolPriceOracle", {
