@@ -430,53 +430,64 @@ The market converts this into the **collateral per debt** quote (1e6 scale) used
 
 ```solidity
 function refreshMarketFactors(address user) public {
-    // Ensure encrypted slots exist and are allowed
-    if (!FHE.isInitialized(pos[user].eCollat)) { ... }
-    if (!FHE.isInitialized(pos[user].eDebt))   { ... }
-    if (!FHE.isInitialized(pos[user].secret)) {
-        pos[user].secret = _generateRNG(0, 27); // encrypted euint32
-        FHE.allowThis(pos[user].secret);
+      if (!FHE.isInitialized(pos[user].eCollat)) {
+          pos[user].eCollat = FHE.asEuint64(0);
+          FHE.allowThis(pos[user].eCollat);
+          FHE.allow(pos[user].eCollat, user);
+      }
+  
+      if (!FHE.isInitialized(pos[user].eDebt)) {
+          pos[user].eDebt = FHE.asEuint64(0);
+          FHE.allowThis(pos[user].eDebt);
+          FHE.allow(pos[user].eDebt, user);
+      }
+  
+      pos[user].secret = _generateRNG(0, 27);
+      FHE.allowThis(pos[user].secret);
+      FHE.allow(pos[user].secret, user);
+  
+      euint64 eCollat = pos[user].eCollat;
+      euint64 eDebt = pos[user].eDebt;
+      euint32 eSecret = pos[user].secret;
+  
+      euint128 uncompleteUAFactor = FHE.mul(FHE.asEuint128(eSecret), FHE.asEuint128(eCollat));
+      euint128 uBFactor = FHE.mul(FHE.asEuint128(eSecret), FHE.asEuint128(eDebt));
+  
+      bytes32[] memory cts = new bytes32[](2);
+      cts[0] = FHE.toBytes32(uncompleteUAFactor);
+      cts[1] = FHE.toBytes32(uBFactor);
+  
+      uint256 requestID = FHE.requestDecryption(cts, this.refreshMarketFactorsCallback.selector);
+      factorDecBundle[requestID] = user;
+  
+      pos[user].updatePending = true;
+  
+      emit decryptionRequested(user, block.number, requestID);
     }
 
-    // Prepare masked products for decryption
-    euint64  eCollat = pos[user].eCollat;
-    euint64  eDebt   = pos[user].eDebt;
-    euint32  eSecret = pos[user].secret;
-
-    euint128 uncompleteUAFactor = FHE.mul(FHE.asEuint128(eSecret), FHE.asEuint128(eCollat));
-    euint128 uBFactor           = FHE.mul(FHE.asEuint128(eSecret), FHE.asEuint128(eDebt));
-
-    bytes32[] memory cts = new bytes32[](2);
-    cts[0] = FHE.toBytes32(uncompleteUAFactor);
-    cts[1] = FHE.toBytes32(uBFactor);
-
-    uint256 requestID = FHE.requestDecryption(cts, this.refreshMarketFactorsCallback.selector);
-    factorDecBundle[requestID] = user;
-    pos[user].updatePending = true;
-
-    emit decryptionRequested(user, block.number, requestID);
-}
-
 function refreshMarketFactorsCallback(
-    uint256 requestID,
-    bytes memory cleartexts,
-    bytes memory decryptionProof
-) external {
-    FHE.checkSignatures(requestID, cleartexts, decryptionProof);
-    (uint128 uncompleteUAFactor, uint128 uBFactor) = abi.decode(cleartexts, (uint128, uint128));
-    address user = factorDecBundle[requestID];
-
-    uint256 uAFactor = uint256(uncompleteUAFactor) * uint256(LT_collat6);
-    pos[user].A = uAFactor;
-    pos[user].B = uint256(uBFactor);
-    pos[user].updatePending = false;
-
-    emit marketFactorsRefreshed(user, requestID, block.number, pos[user].A, pos[user].B);
-}
+      uint256 requestID,
+      bytes memory cleartexts,
+      bytes memory decryptionProof
+  ) external {
+      FHE.checkSignatures(requestID, cleartexts, decryptionProof);
+  
+      (uint128 uncompleteUAFactor, uint128 uBFactor) = abi.decode(cleartexts, (uint128, uint128));
+  
+      address user = factorDecBundle[requestID];
+  
+      uint256 uAFactor = uint256(uncompleteUAFactor) * uint256(LT_collat6);
+  
+      pos[user].A = uAFactor;
+      pos[user].B = uint256(uBFactor);
+      pos[user].updatePending = false;
+  
+      emit marketFactorsRefreshed(user, requestID, block.number, pos[user].A, pos[user].B);
+    }
 ```
 
 **What’s happening:**  
-- A fresh encrypted secret `s` multiplies the encrypted balances to form masked products.  
+- A fresh encrypted secret `s` (generated at each factor refresh) multiplies the encrypted balances to form masked products.  
 - Only the masked products are decrypted by the gateway; raw balances remain confidential.  
 - `A = (s * collat) * LT_collat6`, `B = s * debt` are finalized and stored **publicly**.
 
