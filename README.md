@@ -812,6 +812,18 @@ npx hardhat obol:seize_rate --market USDtoEUR --network sepolia
 ```
 Prints `liquidationSeizePerUnit6` and bonus basis points relative to price.
 
+### 10) Custom price oracle
+You can deploy price oracle independently and then provide the address in the deploy task.
+```bash
+npx hardhat --network sepolia obol:deploy_oracle --relayer 0x94f37a938FC67c3e61cC0dbbeff33373122507ec
+-> Oracle address : 0xF0c298A3c3300D89bA610C3a0a968eFa031dD868
+```
+Then
+```bash
+ npx hardhat --network sepolia obol:deploy --oracle 0xF0c298A3c3300D89bA610C3a0a968eFa031dD868
+```
+If your current signer is not the price relayer address on the oracle, the `obol:set_price` task won't work.
+
 ---
 
 ### OBOL.json (runtime config)
