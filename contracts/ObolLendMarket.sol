@@ -341,10 +341,9 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
             FHE.allow(pos[user].eDebt, user);
         }
 
-        if (!FHE.isInitialized(pos[user].secret)) {
-            pos[user].secret = _generateRNG(0, 27);
-            FHE.allowThis(pos[user].secret);
-        }
+        pos[user].secret = _generateRNG(0, 27);
+        FHE.allowThis(pos[user].secret);
+        FHE.allow(pos[user].secret, user);
 
         euint64 eCollat = pos[user].eCollat;
         euint64 eDebt = pos[user].eDebt;
