@@ -12,7 +12,6 @@ Borrowing and liquidations are driven by **public static factors** and a **publi
 
 - [Design Overview](#design-overview)
 - [Core Math: A/B Factors, Price, Indexes](#core-math-ab-factors-price-indexes-and-health-factor-hf)
-- [Privacy Model](#privacy-model)
 - [Data Structures](#data-structures)
 - [Parameters & Constants](#parameters--constants)
 - [Lifecycle & Flows](#lifecycle--flows)
@@ -23,7 +22,8 @@ Borrowing and liquidations are driven by **public static factors** and a **publi
 - [Rate Accrual & APR](#rate-accrual--apr)
 - [Oracle & Price Semantics](#oracle--price-semantics)
 - [Event Reference](#event-reference)
-- [Key Functions - Code Snippets & Commentary](#key-functions--code-snippets--commentary)
+- [Key Functions - Code Snippets & Commentary](#key-functions---code-snippets--commentary)
+- [ OBOL - Tasks & Deployment Guide](#obol---tasks--deployment-guide)
 - [License](#license)
 
 ---
@@ -393,14 +393,43 @@ Supply APY flows into the **oToken exchange rate** (`supplyIndex6`).
 
 ## Oracle & Price Semantics
 
-You provide the oracle:
+Obol works with a price oracle. This price oracle must be fed by a **relayer** (the oracle deployer).
+The price data should come from a reliable source. In the demo web-app, the oracle gets its data from the associated CAMM pair.
 
 ```solidity
 contract ObolPriceOracle {
-    // price6: USD per 1 EUR, scaled 1e6
-    function setPrice(uint128 _price6, uint64 _epoch) external onlyRelayer;
-    function isFresh() public view returns (bool);
+    event PriceUpdated(uint128 price6, uint64 epoch, uint256 ts);
+
+    address public immutable relayer;
+    uint128 public price6;
+    uint64 public epoch;
+    uint256 public lastTs;
+    uint256 public immutable staleTtl;
+
+    modifier onlyRelayer() {
+        require(msg.sender == relayer, "RELAYER");
+        _;
+    }
+
+    constructor(address _relayer, uint256 _staleTtl) {
+        relayer = _relayer;
+        staleTtl = _staleTtl;
+    }
+
+    function setPrice(uint128 _price6, uint64 _epoch) external onlyRelayer {
+        require(_price6 > 0, "ZERO_PRICE");
+        require(_epoch > epoch, "STALE_EPOCH");
+        price6 = _price6;
+        epoch = _epoch;
+        lastTs = block.timestamp;
+        emit PriceUpdated(_price6, _epoch, lastTs);
+    }
+
+    function isFresh() public view returns (bool) {
+        return block.timestamp - lastTs <= staleTtl;
+    }
 }
+
 ```
 
 The market converts this into the **collateral per debt** quote (1e6 scale) used in risk and liquidation math via `_getPrice()`.
@@ -525,6 +554,289 @@ function liquidationSeizePerUnit6() public view returns (uint128) {
 ```
 
 Seize is then `seize = repay * perUnit6 / 1e6`, clamped by current encrypted collateral.
+
+---
+
+
+## OBOL - Tasks & Deployment Guide
+
+> Hardhat tasks to deploy, operate and inspect **ConfLendMarket** (Obol) with Zama fhEVM.  
+> Amounts use **6 decimals** (1e6 scale) across tokens, prices and indices.
+
+---
+
+### Prerequisites
+
+- **Hardhat** with `hardhat-deploy` and the **fhEVM plugin** (`@fhevm/hardhat-plugin`).
+- Your network config set (e.g., `--network sepolia`).  
+- A signer with funds and permissions to deploy & send txs.
+
+> Tip: when a task mentions *operator*, it refers to **ERC-7984 operator** for confidential transfers (the market/oracle must be set as an operator to move your encrypted funds).
+
+---
+
+### 1) Deploy stack
+
+#### One-shot deployment (tokens + oracle + both markets)
+```bash
+npx hardhat obol:deploy --network sepolia \
+  [--relayer 0xRateRelayer] \
+  [--tokenUsd 0xPreExistingUSD] \
+  [--tokenEur 0xPreExistingEUR]
+```
+- If `--tokenUsd/--tokenEur` are omitted, fixture **ConfidentialToken** contracts are deployed.
+- Writes all addresses into **`OBOL.json`** (see config section below).
+
+**Artifacts registered:**
+- `TokenUSD` (USD ConfidentialToken), `TokenEUR` (EUR ConfidentialToken)
+- `ObolPriceOracle`
+- `ConfLendMarket_EURtoUSD` and `ConfLendMarket_USDtoEUR` (two directed markets)
+- `ConfLendMarket` ABI mirrored for both addresses
+
+---
+
+### 2) Patch defaults (optional)
+
+Update or fix values in `OBOL.json` manually via task:
+```bash
+npx hardhat obol:set_defaults \
+  [--usd 0x...] [--eur 0x...] [--oracle 0x...] \
+  [--m1 0x...]  [--m2 0x...]  [--relayer 0x...] \
+  [--deadline 86400] \
+  --network sepolia
+```
+- `deadline` is the default operator validity in seconds for `setOperator` tasks.
+
+---
+
+### 3) Faucets & balances
+
+#### Airdrop test funds
+```bash
+npx hardhat obol:airdrop --network sepolia
+```
+Claims the example airdrop on both USD and EUR test tokens for the caller.
+
+#### Decrypt & print balances
+```bash
+npx hardhat obol:get_balances --network sepolia
+```
+Prints clear **USD, EUR** balances and **oUSD, oEUR** (market share tokens) by decrypting your own ciphertexts via fhEVM CLI.
+
+---
+
+### 4) Operator approvals (confidential tokens)
+
+Allow a spender (market/oracle/escrow) to move your encrypted tokens:
+```bash
+npx hardhat obol:set_operator \
+  --token 0xToken \
+  --spender 0xSpender \
+  [--seconds 86400] \
+  --network sepolia
+```
+- Sets `setOperator(spender, deadline)` if not already set.  
+- Uses `OPERATOR_DEADLINE_SECS` from `OBOL.json` when available.
+
+---
+
+### 5) Oracle controls
+
+#### Push a price (1e6 scale)
+```bash
+npx hardhat obol:set_price --price6 1100000 --network sepolia
+```
+Sets e.g. **1.10 USD per 1 EUR**. Epoch is `Date.now()/1000` by default.
+
+#### Read current price
+```bash
+npx hardhat obol:get_price --network sepolia
+```
+Prints the last price and timestamp (humanized).
+
+---
+
+### 6) Rates & indexes
+
+#### Set borrow/supply APRs (per-year, 1e6 scale) on both markets
+```bash
+npx hardhat obol:set_rates --borrow 50000 --supply 15000 --network sepolia
+# = 5.0000% borrow APR, 1.5000% supply APR
+```
+> Requires the **rate relayer** role set during deploy.
+
+#### Inspect current APRs
+```bash
+npx hardhat obol:get_rates --network sepolia
+```
+
+#### Manually accrue indices on both markets
+```bash
+npx hardhat obol:update_indexes --network sepolia
+```
+Applies time delta to `borrowIndex6` and `supplyIndex6` immediately.
+
+---
+
+### 7) Market operations
+
+Two directed markets exist:
+- `EURtoUSD` : **collateral EUR**, **debt USD**, oToken = **oUSD**
+- `USDtoEUR` : **collateral USD**, **debt EUR**, oToken = **oEUR**
+
+> All human amounts are multiplied by `1e6` under the hood.
+
+#### Add collateral (encrypted)
+```bash
+npx hardhat obol:add_collat \
+  --market EURtoUSD \
+  --amount 1000 \
+  --network sepolia
+```
+- Ensures the **market** is an **operator** on the **collateral token**.
+- Encrypts the amount and calls `addCollateral(bytes32,bytes)`.
+- Waits for `marketFactorsRefreshed` (A/B recompute).
+
+#### Remove collateral (clamped by safety)
+```bash
+npx hardhat obol:remove_collat \
+  --market USDtoEUR \
+  --amount 250 \
+  --network sepolia
+```
+- Amount is capped so HF stays above the threshold (done under FHE).
+
+#### Deposit debt asset (earn yield → mint oTokens)
+```bash
+npx hardhat obol:deposit_debt \
+  --market EURtoUSD \
+  --amount 500 \
+  --network sepolia
+```
+- Ensures **market** is an **operator** on the **debt token** for the caller.
+- Mints oTokens at `shares = amount * 1e6 / supplyIndex6`.
+
+#### Withdraw debt asset (redeem oTokens → underlying)
+```bash
+npx hardhat obol:withdraw_debt \
+  --market USDtoEUR \
+  --shares 100 \
+  --network sepolia
+```
+- Requires the **market contract to be operator of your oTokens** (the market pulls your shares from you).
+- Pays underlying up to pool liquidity above the internal reserve floor.
+
+#### Borrow (encrypted)
+```bash
+npx hardhat obol:borrow \
+  --market EURtoUSD \
+  --amount 200 \
+  --network sepolia
+```
+- Computes your **encrypted maxBorrow** under FHE and clamps the request.
+- Transfers actual debt tokens; updates encrypted principal; refreshes A/B.
+
+#### Repay (encrypted)
+```bash
+npx hardhat obol:repay \
+  --market USDtoEUR \
+  --amount 75 \
+  --network sepolia
+```
+- Market must be **operator on the debt token** to pull the repayment.
+- Overpay is clamped to outstanding under FHE; A/B refreshed.
+
+#### Compute & decrypt your max borrow
+```bash
+npx hardhat obol:max_borrow \
+  --market EURtoUSD \
+  --network sepolia
+```
+- Calls `maxBorrow()` then decrypts your own `pos.maxBorrow` handle via fhEVM CLI.
+
+---
+
+### 8) Liquidations
+
+#### Check liquidatability (public)
+```bash
+npx hardhat obol:is_liq \
+  --market EURtoUSD \
+  [--user 0xVictim] \
+  --network sepolia
+```
+Uses **public** A, B, price and index ratio; no private data needed.
+
+#### Liquidate (queue seize)
+```bash
+npx hardhat obol:liquidate \
+  --market EURtoUSD \
+  --victim 0xVictim \
+  --amount 50 \
+  --network sepolia
+```
+- Ensures market is **operator on your debt token** (as liquidator).  
+- Repay is clamped to victim’s outstanding encrypted debt; seize is computed with bonus and capped by encrypted collateral.
+- Waits for `LiquidationQueued` event.
+
+#### Claim seized collateral
+```bash
+npx hardhat obol:claim_liquidation \
+  --market EURtoUSD \
+  --victim 0xVictim \
+  --network sepolia
+```
+- Transfers seized **encrypted collateral** to the liquidator.  
+- Prints before/after clear balances by decrypting **your own** ciphertexts.  
+- Triggers factor refresh on the victim’s position.
+
+---
+
+### 9) Position & price utilities
+
+#### Dump & decrypt your `UserPos`
+```bash
+npx hardhat obol:pos --market USDtoEUR --network sepolia
+```
+Outputs handles for encrypted fields + decrypted values for **your** collat/debt/maxBorrow when available.
+
+#### Effective market price (collateral per 1 debt, 1e6)
+```bash
+npx hardhat obol:price_effective --market EURtoUSD --network sepolia
+```
+Uses oracle raw price and market direction (inversion for EUR→USD).
+
+#### Seize rate (collat per 1 repaid debt) + implied bonus
+```bash
+npx hardhat obol:seize_rate --market USDtoEUR --network sepolia
+```
+Prints `liquidationSeizePerUnit6` and bonus basis points relative to price.
+
+---
+
+### OBOL.json (runtime config)
+
+Created/updated by tasks at repo root:
+```jsonc
+{
+  "ORACLE_ADDRESS": "0x...",
+  "TOKEN_USD": "0x...",
+  "TOKEN_EUR": "0x...",
+  "MARKET_EURtoUSD": "0x...",
+  "MARKET_USDtoEUR": "0x...",
+  "RATE_RELAYER": "0x...",
+  "OPERATOR_DEADLINE_SECS": 86400
+}
+```
+- Used by most tasks to resolve addresses & operator deadline defaults.
+
+---
+
+### Notes & Troubleshooting
+
+- **Units**: All amounts and indices are **1e6**-scaled (6 decimals).
+- **Event waits**: Tasks like `add_collat`, `borrow`, and liquidations wait for their respective events (e.g., `marketFactorsRefreshed`, `LiquidationQueued`, `LiquidationClaimed`).
+- **fhEVM CLI**: Tasks that decrypt your values run `fhevm.initializeCLIApi()` and decrypt **only your own** handles (privacy preserving).
 
 ---
 
