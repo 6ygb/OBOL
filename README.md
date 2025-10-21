@@ -1,615 +1,527 @@
-# CAMM - Confidential Automated Market Maker
 
-**A UniswapV2-style AMM where amounts, balances, and reserves are encrypted end-to-end** using **Zama’s Fully Homomorphic Encryption (FHEVM)**.  
-Liquidity, swaps, and even obfuscated reserves are computed on encrypted ciphertexts; only authorized parties can decrypt specific outputs.
-> ⚠️ **Proof-of-concept only** - not production-ready.
+# Obol - Confidential lending protocol
 
-</br></br></br>
+**A single‑pair lending protocol (EUR⇄USD) that keeps user balances fully encrypted on‑chain using Zama’s FHEVM.**  
+Borrowing and liquidations are driven by **public static factors** and a **public price**; **no per‑epoch per‑user recomputation** is needed. Lenders earn yield via **index accrual**. All amounts and user balances remain confidential. Liquidation are done without revealing any informations about the user's postion (debt and collat).
 
-<p align=center> 
-  Built using Zama's <a href="https://github.com/zama-ai/fhevm">fhEVM</a>, Inspired by <a href="https://github.com/Uniswap/v2-core">UniswapV2</a> 
-</p>
-
-## Test it !
-> ⚠️ **Please read the docs first** ⚠️
-
-<br> 
-Front-end POC with test contracts at : https://camm.6ygb.dev <br> <br>
-Deployed on Sepolia :
-
-- Factory (https://sepolia.etherscan.io/address/0x15F98C153493b12D85c0F493e9E7c971203a4809#code) :
-  
-  ```
-  0x15F98C153493b12D85c0F493e9E7c971203a4809
-  ``` 
-
-- Pair (https://sepolia.etherscan.io/address/0x2ab55edf81f6c17fa1A22aF23ed38cE8cF276414#code) :
-  ```
-  0x2ab55edf81f6c17fa1A22aF23ed38cE8cF276414
-  ```
-
-- Token 0 - EUR (https://sepolia.etherscan.io/address/0x20E217aD102f18d20faE1B4C7edCD041EF041fE9#code) :
-  ```
-  0x20E217aD102f18d20faE1B4C7edCD041EF041fE9
-  ```
-
-- Token 1 - USD (https://sepolia.etherscan.io/address/0xDa5C50A7b88F1D9F59465f21488db38885aF1d7B#code) :
-  ```
-  0xDa5C50A7b88F1D9F59465f21488db38885aF1d7B
-  ```
-- Pair Library (https://sepolia.etherscan.io/address/0xDE6f4202A2ca25Fd329EcD11f2c62F90248Ad0fd#code) :
-  ```
-  0xDE6f4202A2ca25Fd329EcD11f2c62F90248Ad0fd
-  ```
-
-<br>
-Front end repo available at https://github.com/6ygb/CAMM-FRONT
-
----
-## What’s inside
-
-- **CAMMFactory**: creates confidential token pairs deterministically.
-- **CAMMPair**: the core AMM logic (add/remove liquidity, swaps, refunds), all with encrypted math.
-- **CAMMPairLib** : helper library which lightens the pair from heavy computation.
-- **testToken** (example): OpenZeppelin ConfidentialFungibleToken with an initial encrypted mint for testing.
-- **Hardhat tasks** to deploy, add liquidity, swap, remove, and trigger refunds.
-- **Tests** that cover “common paths” and refund flows.
+> Built on Zama’s [fhEVM](https://github.com/zama-ai/fhevm). This document explains how the provided `ConfLendMarket` contract works, field‑by‑field and function‑by‑function, with 6‑decimals math throughout.
 
 ---
 
 ## Table of Contents
 
-- [Table of Contents](#table-of-contents)
-- [High-level design](#high-level-design)
-- [On-chain decryption without breaking confidentiality](#on-chain-decryption-without-breaking-confidentiality)
-- [Obfuscated reserves](#obfuscated-reserves)
-- [Refund policy](#refund-policy)
-- [Adding Liquidity](#adding-liquidity)
-- [Contract APIs & Events](#contract-apis--events)
-- [Hardhat Tasks](#hardhat-tasks)
-- [Config file (`CAMM.json`)](#config-file-cammjson)
-- [Testing](#testing)
-- [Limitations](#limitations)
+- [Design Overview](#design-overview)
+- [Core Math: A/B Factors, Price, Indexes](#core-math-ab-factors-price-indexes)
+- [Privacy Model](#privacy-model)
+- [Data Structures](#data-structures)
+- [Parameters & Constants](#parameters--constants)
+- [Lifecycle & Flows](#lifecycle--flows)
+  - [Lenders: deposit / withdraw debt asset](#lenders-deposit--withdraw-debt-asset)
+  - [Borrowers: add / remove collateral, borrow / repay](#borrowers-add--remove-collateral-borrow--repay)
+  - [Liquidations (permissionless)](#liquidations-permissionless)
+- [Public Health Check](#public-health-check)
+- [Rate Accrual & APR](#rate-accrual--apr)
+- [Oracle & Price Semantics](#oracle--price-semantics)
+- [Event Reference](#event-reference)
+- [Key Functions - Code Snippets & Commentary](#key-functions--code-snippets--commentary)
 - [License](#license)
-- [Acknowledgments](#acknowledgments)
 
 ---
 
-## High-level design
+## Design Overview
 
-- **Encrypted types**: the pair operates on mainly `euint64` (FHE types) for amounts (obfuscated reserves are relying on `euint128`).  
-  Reserves, LP amounts, amounts in/out, and computed prices stay encrypted on-chain.
-  
-- **ERC-7984 implementation**: CAMM implements Open Zeppelin's Confidential Token standard **ERC-7984** for both the pair tokens and the pair itself, providing ERC-compatible interfaces while preserving confidentiality.
+- **One contract per direction** (via `Direction` enum at construction):
+  - `EURtoUSD`: debt asset is **EUR**, collateral asset is **USD**.
+  - `USDtoEUR`: debt asset is **USD**, collateral asset is **EUR**.
+- **Encrypted balances** with fhEVM types (`euint64`) for collateral and debt principals.
+- **Static public factors** per user:
+  - `A = s * collat * LT` (scaled 1e6)
+  - `B = s * debtPrincipal` (scaled 1e6)  
+  A fresh encrypted secret `s` (per user) is generated and kept on‑chain (encrypted). Factors are refreshed **only** when a user modifies their position or gets liquidated.
+- **HF off‑chain:** Watchers compute Health Factor using only **A**, **B**, the **public price** and the **public borrow index ratio**. There’s no per‑epoch FHE recompute.
+- **Lenders** supply the **debt asset** (the asset borrowers borrow) and receive confidential **oTokens** (this contract itself extends `ERC7984` to act as the share token).
+- **Liquidations**: Anyone can liquidate an unhealthy account using a public check; the seized collateral is queued and then claimed by the liquidator.
 
-- **Two-step operations**: add-liquidity (post-bootstrap), remove-liquidity, and swap prepare **encrypted** expressions and request **decryption** via the FHEVM gateway, then settle in a callback. While a request is “live”, the pool is temporarily locked. The decrypted amounts will never break the AMM confidentiality, see later sections for further explainations.
-
-- **Timeout guard**: if a decryption is never fulfilled, the pool auto-unlocks after `MAX_DECRYPTION_TIME` (**5 minutes**) to avoid permanent locking in case of gateway outage.
-
-- **Refund Policy**: If the a decryption request is not fulfilled (meaning that an operation like adding/removing liquidity or swapping cannot be entirely completed) in time (or in case of outage on Zama's end), the user can request a refund of the sent funds.
-
-- **Price privacy**: reserves are **obfuscated**, both multiplied by the same number and both are reduced or increased by a % in the range [0.7 - 3.26]. An optional external **price scanner address** is whitelisted to read those obfuscated values facilitating decryption from a front end. Any user can request decryption right to the obfuscated reserves.
-
-- **Fees**: a **1% fee** is applied to every swap in order to pay liquidity providers.
-
-- **LP token**: LP supply is an encrypted `euint64`. A **minimum liquidity** of `100 * 10^6` (since decimals = 6) is enforced on the first mint.
-
+Everything is **6‑decimals** (the same scale as your confidential tokens).
 
 ---
 
+## Core Math: A/B Factors, Price, Indexes, and Health Factor (HF)
 
-## On-chain decryption without breaking confidentiality
+### Static factors
 
-AMMs highly rely on division for computing swap output amounts and all liquidity operations. As for now (**FHEVM 0.7**), division between two encrypted numbers is not supported. However division between a ciphertext and a clear number is possible. This imply that all the denominators must be decrypted. </br> </br>
-Reserves are encrypted for confidentiality, decrypting them at each swap would leak the actual amounts being swaped. That's why, to operate, CAMM must find a way to decrypt reserves or other confidential amounts without leaking their real value. </br> </br>
-To achieve this, CAMM rely on a very simple mathematical concept : **division invariance**.
-This concept states that if you multiply your base numerator and denominator by the same number, the result (ratio) **will stay the same**. </br> </br>
-As written before, only our denominator needs to be decrypted. So if we multiply our numerator and denominator by an **encrypted random number**, only the **denomintaor times a random number** is decrypted, without leaking information on our base denominator value. </br> </br>
-Let's see with a simple example involving a simple swap. </br>
-**Recall**, here is the formula for the output amount of a swap (without fees) : </br>
+For each user $`u`$, the lending engine maintains **two public, static scalars** $`A_u`$ and $`B_u`$ that encode the user’s position in a *homomorphically masked* form.
 
-$\text{amountOut } =\frac{\text{amountIn } \times \text{ reserveOut}}{\text{reserveIn } + \text{ amountIn}}$
-</br></br>
-Let's consider the following setup :
-- **reserves** : `110_000 token0` & `100_000 token1` (ignore decimals)
-- **amountIn** : let's say we want to swap 500 token0 for x token1. </br>
-
-The result would be : </br>
-
-$\text{amount1Out} = \frac{500 \times 100000}{110000 + 500} = 452.42$
-
-Now let's imagine our reserves are encrypted and we do not want to leak their real value. The setup is the same, we only add a random number, let's say **2727**. <br/>
-The base formula become : </br>
-
-$\text{amountOut } =\frac{(\text{amountIn } \times \text{ reserveOut }) \times \text{ randomNumber}}{(\text{reserveIn } + \text{ amountIn})  \times \text{ randomNumber}} $ 
-</br>
-
-And the swap output : </br>
-
-$\text{amount1Out} = \frac{(500 \times 100000) \times 2727}{(110000 + 500) \times 2727} = 452.42$
-</br>
-
-The result stays the same. But after decrypting the denominator, it changes a lot. 
-- $(\text{amountIn } \times \text{ reserveOut }) \times \text{ randomNumber}$ stays encrypted.
-- $(\text{amountIn } + \text{ reserveOut }) \times \text{ randomNumber}$ is decrypted.
-
-Instead of having 110000 + 500 as a clear value, which is very close to the real reserve value, we have $(110000 + 500) \times 2727$. </br>
-As the number is random (thanks to FHEVM API `FHE.randEuint()`), decrypted outputs are random and more resistant to information leak. An observer wanting to find the reserves value will see unrelated increasing and decreasing numbers. </br></br>
-
-The same principle is applied everytime a division is needed :
-- `function addLiquidity()`
-- `function removeLiquidity()`
-- `function swapTokens()`
-
-For example, with the swapTokens function (divUpperPart = numerator, divLowerPart = denominator):
-```solidity
-function computeSwap(
-        euint64 sent0,
-        euint64 sent1,
-        euint64 reserve0,
-        euint64 reserve1
-    ) external returns (euint128, euint128, euint128, euint128) {
-        euint16 rng0 = computeRNG(16384, 3);
-        euint16 rng1 = computeRNG(16384, 3);
-
-        // 1% fee integration in the rng multiplier to optimize HCU consuption
-        euint32 rng0Upper = FHE.div(FHE.mul(FHE.asEuint32(rng0), uint32(99)), uint32(100));
-        euint32 rng1Upper = FHE.div(FHE.mul(FHE.asEuint32(rng1), uint32(99)), uint32(100));
-
-        euint128 divUpperPart0 = FHE.mul(
-            FHE.mul(FHE.asEuint128(sent1), FHE.asEuint128(reserve0)),
-            FHE.asEuint128(rng0Upper)
-        );
-        euint128 divLowerPart0 = FHE.mul(FHE.asEuint128(reserve1), FHE.asEuint128(rng0));
-
-        euint128 divUpperPart1 = FHE.mul(
-            FHE.mul(FHE.asEuint128(sent0), FHE.asEuint128(reserve1)),
-            FHE.asEuint128(rng1Upper)
-        );
-        euint128 divLowerPart1 = FHE.mul(FHE.asEuint128(reserve0), FHE.asEuint128(rng1));
-
-        return (divUpperPart0, divUpperPart1, divLowerPart0, divLowerPart1);
-    }
-
-function swapTokensCallback(
-        uint256 requestID,
-        uint128 _divLowerPart0,
-        uint128 _divLowerPart1,
-        bytes[] memory signatures
-    ) external {
-        if (pendingDecryption.currentRequestID != requestID) revert WrongRequestID();
-        FHE.checkSignatures(requestID, signatures);
-
-        euint128 _divUpperPart0 = swapDecBundle[requestID].divUpperPart0;
-        euint128 _divUpperPart1 = swapDecBundle[requestID].divUpperPart1;
-        address from = swapDecBundle[requestID].from;
-        address to = swapDecBundle[requestID].to;
-
-        euint64 amount0Out = FHE.asEuint64(FHE.div(_divUpperPart0, _divLowerPart0));
-        euint64 amount1Out = FHE.asEuint64(FHE.div(_divUpperPart1, _divLowerPart1));
-
-        FHE.allowThis(amount0Out);
-        FHE.allowThis(amount1Out);
-        _transferTokensFromPool(to, amount0Out, amount1Out, true);
-        [...]
-        emit Swap(
-            from,
-            swapDecBundle[requestID].amount0In,
-            swapDecBundle[requestID].amount1In,
-            swapOutput[requestID].amount0Out,
-            swapOutput[requestID].amount1Out,
-            to
-        );
-
-        delete pendingDecryption;
-        delete standardRefund[from][requestID];
-    }
-
+```math
+A_u = s_u \cdot C_u \cdot LT_{\text{collat,6}}
+```
+```math
+B_u = s_u \cdot D_u
 ```
 
----
+Where:
 
-## Obfuscated reserves
+| Symbol | Meaning |
+|:--|:--|
+| $`s_u`$ | user’s **encrypted random secret**, drawn on-chain as an `euint32` |
+| $`C_u`$ | encrypted collateral amount (confidential balance) |
+| $`D_u`$ | encrypted debt principal |
+| $`LT_{\text{collat,6}}`$ | liquidation threshold (e.g. 0.85 × 1e6 = 850000) |
 
-In CAMM, reserves are encrypted. Broadcasting the exact price of a token to the other (by decrypting the price) could potentialy leak :
-- The proportion of a reserve to another (which is not that sensitive)
-- The price impact of a swap, potentialy giving an approximative idea of its size
+Thus, $`A_u`$ and $`B_u`$ are **clear (public)** values that depend linearly on an unknown secret $`s_u`$. Because $`s_u`$ is unique and encrypted for each user, an observer can only see the *ratios* between $`A_u`$ and $`B_u`$, not the underlying collateral or debt values.
 
-To avoid information leak and to preserve confidentiality, CAMM broadcasts **obfuscated reserves**. It does it by having a public struct containing those **obfuscated reserves** and giving decryption right to whoever asks for it.
-
-```solidity
-struct obfuscatedReservesStruct {
-        euint128 obfuscatedReserve0;
-        euint128 obfuscatedReserve1;
-}
-
-obfuscatedReservesStruct public obfuscatedReserves;
-[...]
-function requestReserveInfo() public {
-        FHE.allow(obfuscatedReserves.obfuscatedReserve0, msg.sender);
-        FHE.allow(obfuscatedReserves.obfuscatedReserve1, msg.sender);
-        emit discloseReservesInfo(
-            block.number,
-            msg.sender,
-            obfuscatedReserves.obfuscatedReserve0,
-            obfuscatedReserves.obfuscatedReserve1
-        );
-    }
-```
-As this process of having to request decryption right everytime to get the approximative price can be repetitive and expensive, an address named **price scanner** can be provided when creating the pair.
-This **price scanner** address is granted permanent decryption right on **obfuscated reserve** and can be used by the front-end of a dApp to decrypt and display price without having to call `requestReserveInfo()`. </br>
-### What are obfuscated reserves
-As their name suggest, these "reserves" are mathematicaly modified to avoid leaking the exact value of the pair reserves. As seen in the previous section, multiplying both numerator and denominator of a division by the same number does not alter the result. </br></br>
-As computing the price of a token to another is just divising a reserve by another (`reserve0/reserve1` = price of token0 in token1), we can multiply reserves by a random number everytime they change to hide their real value. </br></br>
-But this would not be sufficient, in fact, the price would still be exact and could leak the price impact of the last swap if observed before and after it. That's why they're also multiplied by a random number modifying their value by max ±3.26% each (the % is between 0.7% and 3.26%). The final decrypted price is innacurate by max ~ ±7%. This innacuracy changes everytime reserves are updated and its role is to hide swap price impact. </br></br>
-In order to compute **obfuscated reserves**, CAMM uses the following formula : </br>
-$\text{obfuscatedReserve }= \text{reserve }\times \text{ randomPercentageMultiplier }\times \text{ randomEuint16}$ </br>
-$\text{randomPercentageMultiplier } =  1 ± [0.007 - 0.0326]$ </br></br>
-
-This whole process takes place in the `_updateObfuscatedReserves()` and delegated to `CAMMPairLib.computeObfuscatedReserves()` :
-```solidity
-function computeObfuscatedReserves(
-        euint64 reserve0,
-        euint64 reserve1,
-        uint64 scalingFactor
-    ) external returns (euint128, euint128) {
-        euint16 percentage = computeRNG(256, 70);
-
-        //Never overflows because max rng bounded is 326 and max euint16 is 65535
-        euint16 scaledPercentage = FHE.mul(percentage, 100);
-        euint32 upperBound = FHE.add(FHE.asEuint32(scaledPercentage), uint32(scalingFactor));
-        euint32 lowerBound = FHE.sub(uint32(scalingFactor), FHE.asEuint32(scaledPercentage));
-
-        ebool randomBool0 = FHE.randEbool();
-        ebool randomBool1 = FHE.randEbool();
-
-        euint32 reserve0Multiplier = FHE.select(randomBool0, upperBound, lowerBound);
-        euint32 reserve1Multiplier = FHE.select(randomBool1, lowerBound, upperBound);
-
-        euint16 rngMultiplier = computeRNG(0, 3);
-
-        //need euint64 here because max value for upperBound * max value for rngmultiplier > max euint32
-        euint64 reserve0Factor = FHE.mul(FHE.asEuint64(reserve0Multiplier), rngMultiplier);
-        euint64 reserve1Factor = FHE.mul(FHE.asEuint64(reserve1Multiplier), rngMultiplier);
-
-        euint128 _obfuscatedReserve0 = FHE.mul(FHE.asEuint128(reserve0), reserve0Factor);
-        euint128 _obfuscatedReserve1 = FHE.mul(FHE.asEuint128(reserve1), reserve1Factor);
-
-        return (_obfuscatedReserve0, _obfuscatedReserve1);
-    }
-```
+> **When do A/B change?**
+> - **When the user’s encrypted position changes:** add/remove collateral, borrow/repay, or liquidation.  
+> - **They remain static** while only prices and indexes evolve - minimizing on-chain FHE recomputation.
 
 ---
 
-## Refund policy
-CAMM heavily relies on Zama's on-chain decryption process. This process is asynchronous and complex. It happens sometimes that the decryption request is sent but never answered. In this case the user action on the pair is frozen in the middle of its completion. In these cases, the users tokens are already sent to the pair but they never get what they was due. </br> </br>
-To mitigate this issue, every (encrypted) amount sent by users are stored inside **refund strcut**. If ever needed any user can get a refund if the decryption request associated to their action has not been carried out. </br></br>
-The following function create refund bundles :
-- `addLiquidity()`
-- `removeLiquidity()`
-- `swapTokens()`
+### Price (1e6 scale)
+
+At every moment, the oracle provides a single price quote $`P(t)`$ representing how many **collateral units** are equivalent to **1 debt unit**.
 
 ```solidity
-struct standardRefundStruct {
-        euint64 amount0;
-        euint64 amount1;
-}
-struct liquidityRemovalRefundStruct {
-    euint64 lpAmount;
-}
-mapping(address from => mapping(uint256 requestID => standardRefundStruct)) public standardRefund;
-mapping(address from => mapping(uint256 requestID => liquidityRemovalRefundStruct)) public liquidityRemovalRefund;
-[...]
-//Refund bundle creation example
-function _addLiquidity(
-        euint64 amount0,
-        euint64 amount1,
-        address from,
-        uint256 deadline
-) internal ensure(deadline) decryptionAvailable {
-    [...]
-    //sending the tokens without adding them to pool
-    (euint64 sentAmount0, euint64 sentAmount1) = _transferTokensToPool(from, amount0, amount1, false);
-    [...]
-    standardRefund[from][requestID].amount0 = sentAmount0;
-    standardRefund[from][requestID].amount1 = sentAmount1;
-    [...]
+function _getPrice() internal view returns (uint128) {
+    uint128 rawPrice = oracle.price6(); // USD per 1 EUR (1e6 scale)
+    if (direction == Direction.EURtoUSD) {
+        uint256 numerator = 1_000_000_000_000; // 1e12
+        uint256 inv = (numerator + rawPrice - 1) / rawPrice; // ceil division
+        return uint128(inv);
+    } else {
+        return rawPrice;
+    }
 }
 ```
 
-3 public functions are available for any user to get their refund :
-- `requestLiquidityAddingRefund()`
-- `requestSwapRefund()`
-- `requestLiquidityRemovalRefund()`
+Formally:
+```math
+P(t) =
+\begin{cases}
+\frac{1}{\text{USD/EUR}(t)} & \text{for EUR→USD (collateral = USD, debt = EUR)} \\
+\text{USD/EUR}(t) & \text{for USD→EUR (collateral = EUR, debt = USD)}
+\end{cases}
+```
 
-These function work as the following
+---
+
+### Indexes (1e6 scale)
+
+To account for time-dependent interest, the protocol maintains **accrual indexes** that scale all positions proportionally:
+
+- $`I_b(t)`$: **borrow index** (starts at $`1.000.000`$)
+- $`I_s(t)`$: **supply index** (starts at $`1.000.000`$)
+
+Each index evolves continuously according to the current annualized APR ($`\text{APR}_b, \text{APR}_s `$), as:
+
+```math
+I_b(t+\Delta t) = I_b(t) \times \left( 1 + \frac{\text{APR}_b \cdot \Delta t}{10^6 \cdot T_{\text{year}}} \right)
+```
+
+```math
+I_s(t+\Delta t) = I_s(t) \times \left( 1 + \frac{\text{APR}_s \cdot \Delta t}{10^6 \cdot T_{\text{year}}} \right)
+```
+
+In Solidity:
 ```solidity
-function requestSwapRefund(uint256 requestID) public {
-    if (
-        !FHE.isInitialized(standardRefund[msg.sender][requestID].amount0) ||
-        !FHE.isInitialized(standardRefund[msg.sender][requestID].amount1)
-    ) revert NoRefund();
+uint256 inc = (idx6 * apr6 * dt) / (1_000_000 * SECONDS_PER_YEAR);
+```
 
-    euint64 refundAmount0 = standardRefund[msg.sender][requestID].amount0;
-    euint64 refundAmount1 = standardRefund[msg.sender][requestID].amount1;
+When a user borrows, their debt evolves proportionally to:
+```math
+D_u(t) = D_u(t_0) \cdot \frac{I_b(t)}{I_{b,u}(t_0)}
+```
+where $`I_{b,u}(t_0)`$ is the snapshot at the time of the user’s last update.
 
-    _transferTokensFromPool(msg.sender, refundAmount0, refundAmount1, true);
+---
 
-    // If refund is sent prior to decryption we need to block the decryption
-    if (requestID == pendingDecryption.currentRequestID) {
-        delete pendingDecryption;
-    }
+### Health Factor (HF)
 
-    delete standardRefund[msg.sender][requestID];
-    emit Refund(msg.sender, block.number, requestID);
+The **Health Factor** measures the ratio between a user’s adjusted collateral value and their current debt exposure.
+
+Conceptually:
+```math
+HF_u(t) = \frac{\text{collateral value (adjusted by LT)}}{\text{debt value}}
+```
+
+Using the protocol’s masked scalars $`A_u`$ and $`B_u`$, this becomes:
+
+```math
+HF_u(t) =
+\frac{A_u}{B_u \cdot P(t) \cdot \frac{I_b(t)}{I_{b,u}(t_0)}}
+```
+
+Because $`A_u = s_u \cdot C_u \cdot LT`$ and $`B_u = s_u \cdot D_u`$:
+
+```math
+HF_u(t)
+= \frac{s_u \cdot C_u \cdot LT}
+{s_u \cdot D_u \cdot P(t) \cdot \frac{I_b(t)}{I_{b,u}(t_0)}}
+= \frac{C_u \cdot LT}
+{D_u \cdot P(t) \cdot \frac{I_b(t)}{I_{b,u}(t_0)}}
+```
+
+The random secret \( s_u \) **cancels out**, meaning the health factor can be fully computed **without knowing $`s_u`$**, $`C_u`$, or $`D_u`$.  
+All the required data - $`A_u`$, $`B_u`$, $`P(t)`$, and the index ratio - are **public**.
+
+---
+
+### Interpretation
+
+- $`HF > 1`$: position is healthy (collateral sufficiently covers debt).  
+- $`HF = 1`$: user is exactly at the liquidation threshold.  
+- $`HF < 1`$: position becomes liquidatable.
+
+In Solidity, `isLiquidatablePublic()` performs the inequality check corresponding to:
+
+```math
+A_u < B_u \cdot P(t) \cdot \frac{I_b(t)}{I_{b,u}(t_0)} \cdot LT \cdot (1 + \text{HYST})
+```
+
+---
+
+### Why HF Computation is Private Yet Verifiable
+
+Even though anyone can compute `HF_u(t)` from public values, they **cannot deduce** the user’s actual collateral or debt amounts because both are scaled by an **unknown, user-specific secret $`s_u`$**:
+
+```math
+A_u = s_u \cdot C_u \cdot LT
+\quad , \quad
+B_u = s_u \cdot D_u
+```
+
+Without $`s_u`$, the absolute magnitude of $`C_u`$ or $`D_u`$ remains hidden.  
+Only the *relative ratios* across assets (if multiple) could be inferred - not the totals.
+
+Thus:
+- **Risk visibility** (HF, liquidatability) is public.
+- **Wealth confidentiality** (actual holdings) is preserved.
+
+---
+
+## Data Structures
+
+```solidity
+struct UserPos {
+    euint64 eCollat;          // encrypted collateral balance
+    euint64 eDebt;            // encrypted debt principal
+    uint256 A;                // s * collat * LT (public)
+    uint256 B;                // s * debt principal (public)
+    uint64  posEpoch;         // bumps when A/B recomputed
+    uint128 userBorrowIndex6; // snapshot for interest folding
+    euint32 secret;           // encrypted per-user random secret s
+    bool    updatePending;    // locks while factors are refreshing
+    euint64 maxBorrow;        // encrypted “you can borrow up to” (allowed to user)
 }
 
-```
-
----
-
-## Adding Liquidity
-
-On UniswapV2 adding liquidity require the amounts to comply with the **constant product formula** : "This formula, most simply expressed as x * y = k, states that trades must not change the product (k) of a pair’s reserve balances (x and y)". </br> </br>
-In practice, this means liquidity providers must deposit tokens in the same proportion as the current reserves, so that while the pool size (and thus k) increases, the price ratio x/y remains unchanged. </br></br>
-As CAMM reserves values are encrypted and not directly available (only through **Obfuscated Reserves**) it's hard for a user to compute the good token proportion to add as liquidity. CAMM automaticaly computes the right token amounts to add and refunds the rest to the user, directly in the liquidity adding process. </br> </br>
-Those right amounts are computed using prices derived from **Obfuscated Reserves** :
-```solidity
-function computeAddLiquidityCallback(
-        euint64 sentAmount0,
-        euint64 sentAmount1,
-        euint128 partialUpperPart0,
-        euint128 partialUpperPart1,
-        uint128 divLowerPart0,
-        uint128 divLowerPart1,
-        uint128 priceToken0,
-        uint128 priceToken1,
-        uint64 scalingFactor
-    ) external returns (euint64, euint64, euint64, euint64, euint64) {
-        euint64 targetAmount0 = FHE.mul(FHE.div(sentAmount1, uint64(priceToken0)), scalingFactor); // 997_000 HCU
-        euint64 targetAmount1 = FHE.mul(FHE.div(sentAmount0, uint64(priceToken1)), scalingFactor); // 997_000 HCU
-
-        ebool isGoodTarget0 = FHE.ge(targetAmount0, sentAmount0);
-        ebool isGoodTarget1 = FHE.ge(targetAmount1, sentAmount1);
-
-        euint64 amount0 = FHE.select(isGoodTarget0, sentAmount0, targetAmount0);
-        euint64 amount1 = FHE.select(isGoodTarget1, sentAmount1, targetAmount1);
-
-        euint128 divUpperPart0 = FHE.mul(FHE.asEuint128(amount0), partialUpperPart0); // 646_000 HCU
-        euint128 divUpperPart1 = FHE.mul(FHE.asEuint128(amount1), partialUpperPart1); // 646_000 HCU
-
-        euint64 computedLPAmount0 = FHE.asEuint64(FHE.div(divUpperPart0, divLowerPart0)); // 651_000 HCU
-        euint64 computedLPAmount1 = FHE.asEuint64(FHE.div(divUpperPart1, divLowerPart1)); // 651_000 HCU
-
-        euint64 mintAmount = FHE.min(computedLPAmount0, computedLPAmount1);
-
-        euint64 refundAmount0 = FHE.sub(sentAmount0, amount0);
-        euint64 refundAmount1 = FHE.sub(sentAmount1, amount1);
-
-        return (refundAmount0, refundAmount1, mintAmount, amount0, amount1);
-    }
-```
----
-
-## Contract APIs & Events
-
-This section summarizes the most used entry points of `CAMMPair`.
-
-### Constructor & Init
-
-```solidity
-constructor(address _cammPriceScanner) ConfidentialFungibleToken("Liquidity Token", "PAIR", "")
-function initialize(address _token0, address _token1) external
-```
-
-- `cammPriceScanner` is permanently allowed to decrypt **obfuscated reserves** for UI price display.
-- `initialize` must be called by the factory to set `token0` and `token1` (confidential tokens).
-
-### Liquidity
-
-```solidity
-// Contract‑called variant (amounts already encrypted & allowed)
-function addLiquidity(euint64 amount0, euint64 amount1, uint256 deadline) external
-
-// dApp‑called variant (external encryption + proof)
-function addLiquidity(externalEuint64 encryptedAmount0, externalEuint64 encryptedAmount1, uint256 deadline, bytes calldata inputProof) external
-
-// Removal
-function removeLiquidity(euint64 lpAmount, address to, uint256 deadline) external
-function removeLiquidity(externalEuint64 encryptedLPAmount, address to, uint256 deadline, bytes calldata inputProof) external
-```
-
-**Callbacks** (called by the gateway when denominators are decrypted):
-```solidity
-function addLiquidityCallback(
-  uint256 requestID,
-  uint128 divLowerPart0,
-  uint128 divLowerPart1,
-  uint128 _obfuscatedReserve0,
-  uint128 _obfuscatedReserve1,
-  bytes[] memory signatures
-) external
-
-function removeLiquidityCallback(
-  uint256 requestID,
-  uint128 divLowerPart0,
-  uint128 divLowerPart1,
-  bytes[] memory signatures
-) external
-```
-
-### Swaps
-
-```solidity
-function swapTokens(euint64 amount0In, euint64 amount1In, address to, uint256 deadline) external
-function swapTokens(externalEuint64 encryptedAmount0In, externalEuint64 encryptedAmount1In, address to, uint256 deadline, bytes calldata inputProof) external
-
-function swapTokensCallback(
-  uint256 requestID,
-  uint128 _divLowerPart0,
-  uint128 _divLowerPart1,
-  bytes[] memory signatures
-) external
-```
-
-### Refunds
-
-```solidity
-function requestLiquidityAddingRefund(uint256 requestID) public
-function requestSwapRefund(uint256 requestID) public
-function requestLiquidityRemovalRefund(uint256 requestID) public
-```
-
-### Reserves (obfuscated)
-
-```solidity
-function requestReserveInfo() public
-// emits discloseReservesInfo(blockNumber, user, euint128 obfuscatedReserve0, euint128 obfuscatedReserve1)
-```
-
-### Events
-
-- `event decryptionRequested(address from, uint256 blockNumber, uint256 requestID);`
-- `event liquidityMinted(uint256 blockNumber, address user);`
-- `event liquidityBurnt(uint256 blockNumber, address user);`
-- `event Swap(address from, euint64 amount0In, euint64 amount1In, euint64 amount0Out, euint64 amount1Out, address to);`
-- `event Refund(address from, uint256 blockNumber, uint256 requestID);`
-- `event discloseReservesInfo(uint256 blockNumber, address user, euint128 obfuscatedReserve0, euint128 obfuscatedReserve1);`
-
-### Errors
-
-- `error Expired();` — deadline passed.  
-- `error PendingDecryption(uint256 until);` — operation blocked until timeout.  
-- `error Forbidden();` — caller not authorized (e.g., non‑factory initialize).  
-- `error WrongRequestID();` — unexpected callback request ID.  
-- `error DecryptionBlocked();` — (if used) a decryption was invalidated.  
-- `error NoRefund();` — no staged refund for `(msg.sender, requestID)`.
-
----
-
-## Hardhat Tasks
-
-> The repo ships several tasks to **deploy** and exercise the pair.
-
-### Deploy
-
-```bash
-npx hardhat deploy --network sepolia
-npx hardhat task:deploy_camm --network sepolia --scanner 0x...
-```
-
-Writes addresses to `CAMM.json` for reuse by other tasks.
-
-### Add Liquidity
-
-```bash
-# Direct (amounts are encrypted on-chain)
-npx hardhat task:add_liquidity --amount0 12000 --amount1 10000 --network sepolia
-
-```
-
-### Swap
-
-```bash
-npx hardhat task:swap_tokens --amount0 500 --network sepolia
-# or
-npx hardhat task:swap_tokens --amount1 200 --network sepolia
-```
-
-### Remove Liquidity
-
-```bash
-npx hardhat task:remove_liquidity --amount 20000 --network sepolia
-```
-
-### Refunds
-
-```bash
-# After seeing `decryptionRequested(..., requestID)` but no callback
-npx hardhat task:refund_add --request <id> --network sepolia
-npx hardhat task:refund_swap --request <id> --network sepolia
-npx hardhat task:refund_remove --request <id> --network sepolia
-```
-
-### Balances
-```bash
-npx hardhat task:claim_airdrop --network sepolia
-npx hardhat task:get_balances --network sepolia
-npx hardhat task:get_LPBalance --network sepolia
-```
-
----
-
-## Config file (`CAMM.json`)
-
-The tasks persist runtime data under `CAMM.json` at the repo root.
-
-```jsonc
-{
-  "FACTORY_ADDRESS": "0x...",
-  "PAIR_ADDRESS": "0x...",
-  "TOKEN0_ADDRESS": "0x...",
-  "TOKEN1_ADDRESS": "0x...",
-  "SCANNER_ADDRESS": "0x...",
-  "LIQ_ADDED": true
+struct PendingLiqStruct {
+    euint64 seizedCollat;     // encrypted collateral queued for a liquidator
+    bool    exists;
 }
 ```
 
----
-
-## Testing
-
-- Unit tests cover:
-  - Deployment / initialization
-  - First mint & minimum liquidity
-  - Add liquidity (target amounts + refunds)
-  - Remove liquidity (burn, payouts)
-  - Swaps (in/out, 1% fee)
-  - **Refund flows** for each operation (including event polling and timeouts)
+- `pos[u]` stores all per‑user state.
+- `pendingLiquidations[user][liquidator]` queues seized collateral for later claim.
 
 ---
 
-## Limitations
+## Parameters & Constants
 
-- Division of ciphertext by ciphertext is not supported; the design depends on gateway callbacks.
-- Obfuscated prices are **approximate** (~±7%) and change frequently.
-- Gas/HCU costs for encrypted operations are **significant**.
+- `LT_collat6` - liquidation threshold for the collateral (e.g., `850000` for 85%).
+- `LIQ_BONUS_BPS` - liquidation incentive in bps (e.g., `500` = 5%).
+- `HYST_BPS` - public hysteresis in bps to avoid flapping around HF≈1 (default `100` = 1%).
+- `borrowApr6`, `supplyApr6` - per‑year APRs, 1e6 scale (set by `rateRelayer`).
+- `borrowIndex6`, `supplyIndex6` - indices starting at `1_000_000`.
+- `RESERVE_MIN6` - minimum debt‑asset reserve kept in the pool to preserve liquidity for withdrawals.
+- `CLOSE_FACTOR_BPS` - maximum debt percentage a liquidator may repay per call (present as a constant; use as policy if desired).
+
+---
+
+## Lifecycle & Flows
+
+### Lenders: deposit / withdraw debt asset
+
+Lenders provide the **debt asset** (EUR in `EURtoUSD`, USD in `USDtoEUR`) and receive confidential **oTokens** (this `ERC7984`) that appreciate as `supplyIndex6` grows.
+
+**Deposit (mint oTokens):**
+```solidity
+function depositDebtAsset(externalEuint64 encryptedAmount, bytes calldata proof) external
+```
+1. Pull encrypted amount from the lender.  
+2. Mint **oTokens** at:  
+   `shares = amount * 1e6 / supplyIndex6` (all 1e6‑scaled).  
+3. On the very first deposit, keep a `RESERVE_MIN6` buffer in the pool.
+
+**Withdraw (burn oTokens):**
+```solidity
+function withdrawDebtAsset(externalEuint64 encryptedAmount, bytes calldata proof) external
+```
+1. Burn requested shares (or clamp by liquidity).  
+2. Pay out underlying: `underlying = shares * supplyIndex6 / 1e6`.  
+3. Enforce the `RESERVE_MIN6` floor.
+
+> oTokens are fully confidential (encrypted share amounts), since `ConfLendMarket` inherits `ERC7984` and mints/burns using `euint64` amounts.
+
+---
+
+### Borrowers: add / remove collateral, borrow / repay
+
+#### Add collateral
+```solidity
+function addCollateral(externalEuint64 encryptedAmount, bytes calldata proof) external
+```
+- Pull encrypted collateral from user and increase `eCollat`.
+- Trigger **factor refresh** to recompute public `A` and `B` with a fresh secret (see below).
+
+#### Remove collateral (clamped to safety)
+```solidity
+function removeCollateral(externalEuint64 encryptedAmount, bytes calldata proof) external
+```
+- Using **public** scalars (A, B, price, indexes), compute how much “safety buffer” in A remains.
+- Encrypted check: `requested * (s*LT) <= excess` using the encrypted `secret` and LT.  
+- Transfer the **safe** amount; refresh factors.
+
+#### Borrow debt asset (clamped by max borrow)
+```solidity
+function borrow(externalEuint64 encryptedAmount, bytes calldata proof) external
+```
+- Fold interest into encrypted principal (`updateDebtInterest`), keeping balances consistent.
+- Compute encrypted **maxBorrow** from current collateral via:
+  ```
+  maxBorrowDebt ≈ (eCollat * LT) / (price * idxRatio)
+  idxRatio = borrowIndex6 / userBorrowIndex6
+  ```
+- Clamp to that maximum, transfer debt to user, increase `eDebt`, refresh factors.
+
+#### Repay
+```solidity
+function repay(externalEuint64 encryptedAmount, bytes calldata proof) external
+```
+- Fold interest, clamp repay to outstanding, pull encrypted repay, reduce `eDebt`, refresh factors.
+
+---
+
+### Liquidations (permissionless)
+
+**Pre‑check (public):**
+```solidity
+function isLiquidatablePublic(address u) public view returns (bool)
+```
+Compares `A` to the RHS built from `B`, `price`, `idxRatio`, `LT`, and `HYST_BPS` (see [Public Health Check](#public-health-check)).
+
+**Execute liquidation:**
+```solidity
+function liquidate(address targetUser, externalEuint64 encryptedAmount, bytes calldata proof) external
+```
+- Fold interest and clamp `repay` to debt. Pull encrypted repay from the liquidator.
+- Compute **seize** in collateral units:
+  ```
+  perUnit6 = price6 * (1 + LIQ_BONUS_BPS/10000)
+  seize = repay * perUnit6 / 1e6
+  ```
+- Clamp by available `eCollat`, reduce `eDebt`, reduce `eCollat` by `seize`.
+- **Queue** the seized collateral in `pendingLiquidations[targetUser][liquidator]`.
+- Liquidator later calls:
+  ```solidity
+  function claimLiquidation(address user) external
+  ```
+  to receive the encrypted seized collateral transfer; then the victim’s factors are refreshed.
+
+> Seize and repay amounts are never made public. Transfers are confidential; only the **liquidatability** condition is public.
+
+---
+
+## Public Health Check
+
+```solidity
+function isLiquidatablePublic(address u) public view returns (bool) {
+    UserPos memory p = pos[u];
+    if (p.B == 0) return false;
+
+    uint128 price6 = _getPrice();
+    uint256 userIdx = (p.userBorrowIndex6 == 0) ? borrowIndex6 : p.userBorrowIndex6;
+    uint256 idxRatio6 = (uint256(borrowIndex6) * 1_000_000) / userIdx;
+
+    // debt side with price and index ratio (1e6)
+    uint256 rhs = (((uint256(p.B) * uint256(price6)) / 1_000_000) * idxRatio6) / 1_000_000;
+
+    // include LT and hysteresis on RHS
+    uint256 rhsWithLT   = rhs * uint256(LT_collat6);
+    uint256 rhsWithHyst = (rhsWithLT * (10_000 + HYST_BPS)) / 10_000;
+
+    return uint256(p.A) < rhsWithHyst;
+}
+```
+
+Interpretation: **liquidate if** the public `A` (masked collateral * LT) is **less than** the debt‑side expression inflated by LT and hysteresis at the current price and index ratio.
+
+---
+
+## Rate Accrual & APR
+
+APR parameters are **per year** at 1e6 scale (`borrowApr6`, `supplyApr6`) and are set by a `rateRelayer`.
+
+```solidity
+function setRates(uint64 brPerSec6, uint64 srPerSec6) external onlyRateRelayer
+```
+
+Indexes update with wall‑clock time:
+
+```solidity
+function updateIndexes() public {
+    uint64 dt = uint64(block.timestamp) - lastAccrualTs;
+    if (dt == 0) return;
+    borrowIndex6 = _acc(borrowIndex6, borrowApr6, dt);
+    supplyIndex6 = _acc(supplyIndex6, supplyApr6, dt);
+    lastAccrualTs = uint64(block.timestamp);
+}
+function _acc(uint128 idx6, uint64 apr6, uint64 dt) internal pure returns (uint128) {
+    // idx_new = idx * (1 + APR * dt / YEAR)
+    uint256 inc = (uint256(idx6) * uint256(apr6) * uint256(dt)) / (1_000_000 * SECONDS_PER_YEAR);
+    return uint128(uint256(idx6) + inc);
+}
+```
+
+Borrower debt growth is folded into the encrypted principal on **user touch** via:
+```
+eDebt := eDebt * (borrowIndex6 / userBorrowIndex6)
+userBorrowIndex6 := borrowIndex6
+```
+
+Supply APY flows into the **oToken exchange rate** (`supplyIndex6`).
+
+---
+
+## Oracle & Price Semantics
+
+You provide the oracle:
+
+```solidity
+contract ObolPriceOracle {
+    // price6: USD per 1 EUR, scaled 1e6
+    function setPrice(uint128 _price6, uint64 _epoch) external onlyRelayer;
+    function isFresh() public view returns (bool);
+}
+```
+
+The market converts this into the **collateral per debt** quote (1e6 scale) used in risk and liquidation math via `_getPrice()`.
+
+> All state‑changing user actions that depend on price are guarded by `fresh` (oracle staleness check).
+
+---
+
+## Event Reference
+
+- `Borrow(address u, uint64 amt6)` - a borrow executed (amount is logged as 0 in this build to avoid leakage).
+- `Repay(address u, uint64 amt6)` - a repay executed (amount omitted for privacy).
+- `CollateralAdded(address u, uint256 blockNumber)` - collateral increased.
+- `CollateralRemoved(address u, uint64 amt6)` - collateral reduced (amount omitted).
+- `RatesUpdated(uint64 brPerSec6, uint64 srPerSec6)` - APRs updated.
+- `Accrued(uint128 borrowIndex6, uint128 supplyIndex6)` - indices updated.
+- `decryptionRequested(address user, uint256 blockNumber, uint256 requestID)` - factor refresh requested.
+- `marketFactorsRefreshed(address user, uint256 requestID, uint256 blockNumber, uint256 A, uint256 B)` - A/B refreshed.
+- `LiquidationQueued(address user, address liquidator, uint256 blockNumber)` - a liquidation seized collateral (queued).
+- `LiquidationClaimed(address user, address liquidator, uint256 blockNumber)` - liquidator claimed seized collateral.
+
+---
+
+## Key Functions - Code Snippets & Commentary
+
+### Factor Refresh (A, B)
+
+```solidity
+function refreshMarketFactors(address user) public {
+    // Ensure encrypted slots exist and are allowed
+    if (!FHE.isInitialized(pos[user].eCollat)) { ... }
+    if (!FHE.isInitialized(pos[user].eDebt))   { ... }
+    if (!FHE.isInitialized(pos[user].secret)) {
+        pos[user].secret = _generateRNG(0, 27); // encrypted euint32
+        FHE.allowThis(pos[user].secret);
+    }
+
+    // Prepare masked products for decryption
+    euint64  eCollat = pos[user].eCollat;
+    euint64  eDebt   = pos[user].eDebt;
+    euint32  eSecret = pos[user].secret;
+
+    euint128 uncompleteUAFactor = FHE.mul(FHE.asEuint128(eSecret), FHE.asEuint128(eCollat));
+    euint128 uBFactor           = FHE.mul(FHE.asEuint128(eSecret), FHE.asEuint128(eDebt));
+
+    bytes32[] memory cts = new bytes32[](2);
+    cts[0] = FHE.toBytes32(uncompleteUAFactor);
+    cts[1] = FHE.toBytes32(uBFactor);
+
+    uint256 requestID = FHE.requestDecryption(cts, this.refreshMarketFactorsCallback.selector);
+    factorDecBundle[requestID] = user;
+    pos[user].updatePending = true;
+
+    emit decryptionRequested(user, block.number, requestID);
+}
+
+function refreshMarketFactorsCallback(
+    uint256 requestID,
+    bytes memory cleartexts,
+    bytes memory decryptionProof
+) external {
+    FHE.checkSignatures(requestID, cleartexts, decryptionProof);
+    (uint128 uncompleteUAFactor, uint128 uBFactor) = abi.decode(cleartexts, (uint128, uint128));
+    address user = factorDecBundle[requestID];
+
+    uint256 uAFactor = uint256(uncompleteUAFactor) * uint256(LT_collat6);
+    pos[user].A = uAFactor;
+    pos[user].B = uint256(uBFactor);
+    pos[user].updatePending = false;
+
+    emit marketFactorsRefreshed(user, requestID, block.number, pos[user].A, pos[user].B);
+}
+```
+
+**What’s happening:**  
+- A fresh encrypted secret `s` multiplies the encrypted balances to form masked products.  
+- Only the masked products are decrypted by the gateway; raw balances remain confidential.  
+- `A = (s * collat) * LT_collat6`, `B = s * debt` are finalized and stored **publicly**.
+
+### Max Borrow (encrypted “quote to user”)
+
+```solidity
+function _maxBorrowFromCollat(address user) internal returns (euint64) {
+    updateIndexes();
+
+    uint128 price6 = _getPrice();
+    uint256 userIdx = (pos[user].userBorrowIndex6 == 0) ? borrowIndex6 : pos[user].userBorrowIndex6;
+    uint256 idxRatio6 = (uint256(borrowIndex6) * 1_000_000) / userIdx;
+
+    // den = price * idxRatio (1e6 scale)
+    uint256 den = (uint256(price6) * idxRatio6) / 1_000_000;
+
+    // eMax ≈ (eCollat * LT) / den
+    euint128 num = FHE.mul(FHE.asEuint128(pos[user].eCollat), uint128(LT_collat6));
+    euint64  eMax = FHE.asEuint64(FHE.div(num, uint128(den)));
+
+    // Store and allow the encrypted maxBorrow to the user for off-chain decryption
+    pos[user].maxBorrow = eMax;
+    FHE.allowThis(pos[user].maxBorrow);
+    FHE.allow(pos[user].maxBorrow, user);
+    return eMax;
+}
+```
+
+The user can call `maxBorrow()` to have the latest value allowed to them for local decryption.
+
+### Liquidation - seize amount per unit
+
+```solidity
+function liquidationSeizePerUnit6() public view returns (uint128) {
+    uint128 price6 = _getPrice(); // collat per 1 debt, 1e6
+    uint256 v = (uint256(price6) * uint256(10_000 + LIQ_BONUS_BPS)) / 10_000;
+    return uint128(v);
+}
+```
+
+Seize is then `seize = repay * perUnit6 / 1e6`, clamped by current encrypted collateral.
 
 ---
 
 ## License
 
-- Original contributions in this repo (including all `CAMM` smart contracts, tests, and tasks) are under the **BSD 3-Clause Clear License**.
-- Template/dependencies (e.g., FHEVM tooling) follow their respective licenses (e.g., **MIT**). Check each package for details.
-
----
-
-## Acknowledgments
-
-- Built on **Zama’s FHEVM** for encrypted smart-contract computation.  
-  Docs: https://docs.zama.ai/fhevm
-
-
-<br />
-<br />
-<br />
-<br />
-
-
-
-
-# FHEVM Hardhat Template
-
-A FHEVM Hardhat-based template for developing Solidity smart contracts.
-
-# Quick Start
-
-- [FHEVM Hardhat Quick Start Tutorial](https://docs.zama.ai/protocol/solidity-guides/getting-started/quick-start-tutorial)
-
-# Documentation
-
-- [The FHEVM documentation](https://docs.zama.ai/fhevm)
-- [How to set up a FHEVM Hardhat development environment](https://docs.zama.ai/protocol/solidity-guides/getting-started/setup)
-- [Run the FHEVM Hardhat Template Tests](https://docs.zama.ai/protocol/solidity-guides/development-guide/hardhat/run_test)
-- [Write FHEVM Tests using Hardhat](https://docs.zama.ai/protocol/solidity-guides/development-guide/hardhat/write_test)
-- [FHEVM Hardhart Plugin](https://docs.zama.ai/protocol/solidity-guides/development-guide/hardhat)
+- Contract is released under the **BSD 3‑Clause Clear License** (same as your other projects).  
+- Dependencies retain their original licenses (e.g., fhEVM / OZ forks).
