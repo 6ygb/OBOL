@@ -265,14 +265,32 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
         uint256 den = (uint256(price6) * idxRatio6) / 1_000_000;
         require(den > 0, "DEN_ZERO");
 
-        euint128 num = FHE.mul(FHE.asEuint128(pos[user].eCollat), uint128(LT_collat6));
-        euint64 eMax = FHE.asEuint64(FHE.div(num, uint128(den)));
+        if (!FHE.isInitialized(pos[user].eCollat)) {
+            pos[user].eCollat = FHE.asEuint64(0);
+            FHE.allowThis(pos[user].eCollat);
+            FHE.allow(pos[user].eCollat, user);
+        }
+        if (!FHE.isInitialized(pos[user].eDebt)) {
+            pos[user].eDebt = FHE.asEuint64(0);
+            FHE.allowThis(pos[user].eDebt);
+            FHE.allow(pos[user].eDebt, user);
+        }
 
-        pos[user].maxBorrow = eMax;
+        uint256 denAdj = (den * (10_000 + HYST_BPS)) / 10_000;
+        require(denAdj <= type(uint128).max, "DEN_OVF");
+
+        euint128 num = FHE.mul(FHE.asEuint128(pos[user].eCollat), uint128(LT_collat6));
+        euint64 eMax = FHE.asEuint64(FHE.div(num, uint128(denAdj)));
+
+        // Headroom = max(0, eMaxAbs - eDebt)
+        ebool underflow = FHE.gt(pos[user].eDebt, eMax);
+        euint64 headroom = FHE.select(underflow, FHE.asEuint64(0), FHE.sub(eMax, pos[user].eDebt));
+
+        pos[user].maxBorrow = headroom;
         FHE.allowThis(pos[user].maxBorrow);
         FHE.allow(pos[user].maxBorrow, user);
 
-        return eMax;
+        return headroom;
     }
 
     /**
@@ -314,11 +332,13 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
         if (!FHE.isInitialized(pos[user].eCollat)) {
             pos[user].eCollat = FHE.asEuint64(0);
             FHE.allowThis(pos[user].eCollat);
+            FHE.allow(pos[user].eCollat, user);
         }
 
         if (!FHE.isInitialized(pos[user].eDebt)) {
             pos[user].eDebt = FHE.asEuint64(0);
             FHE.allowThis(pos[user].eDebt);
+            FHE.allow(pos[user].eDebt, user);
         }
 
         if (!FHE.isInitialized(pos[user].secret)) {
