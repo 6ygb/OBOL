@@ -63,11 +63,6 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
 
     // ---------- Events ----------
 
-    event Borrow(address indexed u, uint64 amt6);
-    event Repay(address indexed u, uint64 amt6);
-    event CollateralAdded(address indexed u, uint256 blockNumber);
-    event CollateralRemoved(address indexed u, uint64 amt6);
-
     event RatesUpdated(uint64 brPerSec6, uint64 srPerSec6);
     event Accrued(uint128 borrowIndex6, uint128 supplyIndex6);
     event marketFactorsRefreshed(address indexed user, uint256 requestID, uint256 blockNumber, uint256 A, uint256 B);
