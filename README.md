@@ -11,7 +11,7 @@ Borrowing and liquidations are driven by **public static factors** and a **publi
 ## Table of Contents
 
 - [Design Overview](#design-overview)
-- [Core Math: A/B Factors, Price, Indexes](#core-math-ab-factors-price-indexes)
+- [Core Math: A/B Factors, Price, Indexes](#core-math-ab-factors-price-indexes-and-health-factor-hf)
 - [Privacy Model](#privacy-model)
 - [Data Structures](#data-structures)
 - [Parameters & Constants](#parameters--constants)
@@ -411,10 +411,6 @@ The market converts this into the **collateral per debt** quote (1e6 scale) used
 
 ## Event Reference
 
-- `Borrow(address u, uint64 amt6)` - a borrow executed (amount is logged as 0 in this build to avoid leakage).
-- `Repay(address u, uint64 amt6)` - a repay executed (amount omitted for privacy).
-- `CollateralAdded(address u, uint256 blockNumber)` - collateral increased.
-- `CollateralRemoved(address u, uint64 amt6)` - collateral reduced (amount omitted).
 - `RatesUpdated(uint64 brPerSec6, uint64 srPerSec6)` - APRs updated.
 - `Accrued(uint128 borrowIndex6, uint128 supplyIndex6)` - indices updated.
 - `decryptionRequested(address user, uint256 blockNumber, uint256 requestID)` - factor refresh requested.
