@@ -186,6 +186,7 @@ async function enc64For(hre: HardhatRuntimeEnvironment, ctrAddr: string, user: s
 }
 
 task("obol:deploy", "Deploy tokens + oracle + markets via fixtures and save to OBOL.json")
+  .addFlag("reset", "Force redeploy of underlying hardhat-deploy scripts")
   .addOptionalParam("relayer", "Rate relayer address (defaults to deployer)", undefined, types.string)
   .addOptionalParam("tokenUsd", "Pre-existing USD token address.", undefined, types.string)
   .addOptionalParam("tokenEur", "Pre-existing EUR token address.", undefined, types.string)
@@ -212,6 +213,7 @@ task("obol:deploy", "Deploy tokens + oracle + markets via fixtures and save to O
     if (providedOracle) {
       console.log(`Using provided oracle address -> ${providedOracle}`);
     }
+    if (_args.reset) console.log("RESET enabled: underlying deploy scripts will redeploy.");
 
     process.env.RATE_RELAYER = rateRelayer;
     if (providedOracle) {
@@ -230,16 +232,16 @@ task("obol:deploy", "Deploy tokens + oracle + markets via fixtures and save to O
       await save("TokenUSD", { address: providedUsd!, abi: tokenAbi.abi });
       await save("TokenEUR", { address: providedEur!, abi: tokenAbi.abi });
     } else {
-      await run("deploy", { tags: "tokens" });
+      await run("deploy", { tags: "tokens", reset: _args.reset });
     }
 
     if (providedOracle) {
       const oracleAbi = (await getArtifact("ObolPriceOracle")).abi;
       await save("ObolPriceOracle", { address: providedOracle, abi: oracleAbi });
     } else {
-      await run("deploy", { tags: "oracle" });
+      await run("deploy", { tags: "oracle", reset: _args.reset });
     }
-    await run("deploy", { tags: "markets" });
+    await run("deploy", { tags: "markets", reset: _args.reset });
 
     // grab deployments
     const usd = await get("TokenUSD"); // ConfidentialToken("Us Dollar","USD")
@@ -288,6 +290,24 @@ task("obol:deploy_oracle", "Deploy oracle independently")
     });
     console.log("Saved to OBOL.json");
   });
+
+task("obol:get_price_relayer", "Gets the oracle price relayer").setAction(async (_args, hre) => {
+  const oracle = await getOracle(hre, _args.oracle ? String(_args.oracle) : undefined);
+
+  const priceRelayer = await oracle.relayer();
+  console.log("Oracle price relayer address :", priceRelayer);
+});
+
+task("obol:get_oracle_address", "Gets the oracle address from markets").setAction(async (_args, hre) => {
+  const m1 = await getMarket(hre, "EURtoUSD");
+  const m2 = await getMarket(hre, "USDtoEUR");
+
+  const oracleM1 = await m1.oracleAddress();
+  const oracleM2 = await m2.oracleAddress();
+  console.log(
+    `Oracle address on market 1 (EURtoUSD) : ${oracleM1}\nOracle address on market 2 (EURtoUSD) : ${oracleM2}`,
+  );
+});
 
 task("obol:set_defaults", "Patch OBOL.json defaults")
   .addOptionalParam("usd", "Token USD address", undefined, types.string)
