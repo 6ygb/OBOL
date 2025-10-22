@@ -36,6 +36,7 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
     IERC7984 public immutable debtToken;
     address public immutable collatTokenAddress;
     address public immutable debtTokenAddress;
+    address public immutable oracleAddress;
     ObolPriceOracle public immutable oracle;
 
     uint32 public immutable LT_collat6;
@@ -121,6 +122,7 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
         debtToken = IERC7984(_debt);
         debtTokenAddress = _debt;
         collatTokenAddress = _collat;
+        oracleAddress = _oracle;
         oracle = ObolPriceOracle(_oracle);
         LT_collat6 = 850000;
         LIQ_BONUS_BPS = 500;
