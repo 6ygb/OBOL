@@ -191,12 +191,12 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
      * @return price6 Collateral units per 1 debt unit (1e6 scale)
      */
     function _getPrice() internal view returns (uint128) {
-        //Oracle price is in EUR so we may need to adjust
+        // Oracle returns EUR per 1 USD (EUR/USD), scaled 1e6
         uint128 rawPrice = oracle.price6();
 
         // We always return: price = (collateral units) per 1 (debt unit), scaled 1e6
-        // - EURtoUSD: collateral=USD, debt=EUR  -> use USD/EUR as-is
-        // - USDtoEUR: collateral=EUR, debt=USD  -> need EUR/USD = 1 / (USD/EUR)
+        // - EURtoUSD: collateral = EUR, debt = USD  -> need EUR/USD = 1 / (USD/EUR)  (invert)
+        // - USDtoEUR: collateral = USD, debt = EUR  -> use USD/EUR as-is
         if (direction == Direction.EURtoUSD) {
             uint256 numerator = 1_000_000_000_000; // 1e12
             uint256 inv = (numerator + rawPrice - 1) / rawPrice; // ceil division
