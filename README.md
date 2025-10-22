@@ -820,9 +820,21 @@ npx hardhat --network sepolia obol:deploy_oracle --relayer 0x94f37a938FC67c3e61c
 ```
 Then
 ```bash
- npx hardhat --network sepolia obol:deploy --oracle 0xF0c298A3c3300D89bA610C3a0a968eFa031dD868
+ npx hardhat --network sepolia obol:deploy --reset --oracle 0xF0c298A3c3300D89bA610C3a0a968eFa031dD868
 ```
 If your current signer is not the price relayer address on the oracle, the `obol:set_price` task won't work.
+
+### 11) Get oracle address from markets
+To check what oracle is currently used by the markets :
+```bash
+npx hardhat --network sepolia obol:get_oracle_address
+```
+
+### 12) Get price relayer address from pracle
+To check what is the current price relayer address :
+```bash
+npx hardhat --network sepolia obol:get_price_relayer
+```
 
 ---
 
