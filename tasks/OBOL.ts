@@ -188,8 +188,8 @@ async function enc64For(hre: HardhatRuntimeEnvironment, ctrAddr: string, user: s
 task("obol:deploy", "Deploy tokens + oracle + markets via fixtures and save to OBOL.json")
   .addFlag("reset", "Force redeploy of underlying hardhat-deploy scripts")
   .addOptionalParam("relayer", "Rate relayer address (defaults to deployer)", undefined, types.string)
-  .addOptionalParam("tokenUsd", "Pre-existing USD token address.", undefined, types.string)
-  .addOptionalParam("tokenEur", "Pre-existing EUR token address.", undefined, types.string)
+  .addOptionalParam("tokenusd", "Pre-existing USD token address.", undefined, types.string)
+  .addOptionalParam("tokeneur", "Pre-existing EUR token address.", undefined, types.string)
   .addOptionalParam("oracle", "Pre-existing oracle address", undefined, types.string)
   .setAction(async function (_args: TaskArguments, hre) {
     const { ethers, deployments, getNamedAccounts, network, run } = hre;
@@ -198,8 +198,8 @@ task("obol:deploy", "Deploy tokens + oracle + markets via fixtures and save to O
     const signer = await ethers.getSigner(deployer);
 
     const rateRelayer = _args.relayer ? ethers.getAddress(String(_args.relayer)) : signer.address;
-    const providedUsd = _args.tokenUsd ? ethers.getAddress(String(_args.tokenUsd)) : undefined;
-    const providedEur = _args.tokenEur ? ethers.getAddress(String(_args.tokenEur)) : undefined;
+    const providedUsd = _args.tokenusd ? ethers.getAddress(String(_args.tokenusd)) : undefined;
+    const providedEur = _args.tokeneur ? ethers.getAddress(String(_args.tokeneur)) : undefined;
     const providedOracle = _args.oracle ? ethers.getAddress(String(_args.oracle)) : undefined;
     const useProvidedTokens = Boolean(providedUsd && providedEur);
 
