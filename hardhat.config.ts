@@ -32,9 +32,7 @@ const config: HardhatUserConfig = {
     only: ["ObolLendMarket"], // optional: limit the report
   },
   etherscan: {
-    apiKey: {
-      sepolia: vars.get("ETHERSCAN_API_KEY", ""),
-    },
+    apiKey: vars.get("ETHERSCAN_API_KEY", ""),
   },
   gasReporter: {
     currency: "USD",
