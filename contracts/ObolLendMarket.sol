@@ -132,6 +132,20 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
     }
 
     /**
+     * @notice Computes ceil(a * b / c) with a single rounding step.
+     * @dev Rounds the division up (toward +∞). T
+     * @param a Multiplicand
+     * @param b Multiplier
+     * @param c Divisor (must be non-zero)
+     * @return q The value ceil(a * b / c)
+     */
+    function _ceilDivMul(uint256 a, uint256 b, uint256 c) internal pure returns (uint256) {
+        unchecked {
+            return (a * b + (c - 1)) / c;
+        }
+    }
+
+    /**
      * @dev Generates an encrypted random number with optional max and min-add constraints.
      * @param max     Upper bound (0 => unbounded)
      * @param minAdd  If non-zero, ensures result >= minAdd by conditional add
@@ -191,19 +205,17 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
      * @return price6 Collateral units per 1 debt unit (1e6 scale)
      */
     function _getPrice() internal view returns (uint128) {
-        // Oracle returns EUR per 1 USD (EUR/USD), scaled 1e6
-        uint128 rawPrice = oracle.price6();
+        // Oracle returns USD per 1 EUR (USD/EUR), 1e6
+        uint128 raw = oracle.price6();
 
-        // We always return: price = (collateral units) per 1 (debt unit), scaled 1e6
-        // - EURtoUSD: collateral = EUR, debt = USD  -> need EUR/USD = 1 / (USD/EUR)  (invert)
-        // - USDtoEUR: collateral = USD, debt = EUR  -> use USD/EUR as-is
         if (direction == Direction.EURtoUSD) {
-            uint256 numerator = 1_000_000_000_000; // 1e12
-            uint256 inv = (numerator + rawPrice - 1) / rawPrice; // ceil division
+            //need EUR per 1 USD -> invert(USD/EUR)
+            uint256 inv = _ceilDivMul(1_000_000_000_000, 1, raw); // ceil(1e12 * 1 / raw)
             require(inv <= type(uint128).max, "PRICE_OVERFLOW");
             return uint128(inv);
         } else {
-            return rawPrice;
+            //USDtoEUR: need USD per 1 EUR -> use raw
+            return raw;
         }
     }
 
@@ -257,10 +269,14 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
 
         uint128 price6 = _getPrice();
         uint256 userIdx = (pos[user].userBorrowIndex6 == 0) ? borrowIndex6 : pos[user].userBorrowIndex6;
-        uint256 idxRatio6 = (uint256(borrowIndex6) * 1_000_000) / userIdx;
 
-        uint256 den = (uint256(price6) * idxRatio6) / 1_000_000;
+        uint256 idxRatio6 = _ceilDivMul(uint256(borrowIndex6), 1_000_000, userIdx);
+
+        uint256 den = _ceilDivMul(uint256(price6), idxRatio6, 1_000_000);
         require(den > 0, "DEN_ZERO");
+
+        uint256 denAdj = _ceilDivMul(den, uint256(10_000 + HYST_BPS), 10_000); // 1e6
+        require(denAdj <= type(uint128).max, "DEN_OVF");
 
         if (!FHE.isInitialized(pos[user].eCollat)) {
             pos[user].eCollat = FHE.asEuint64(0);
@@ -273,13 +289,10 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
             FHE.allow(pos[user].eDebt, user);
         }
 
-        uint256 denAdj = (den * (10_000 + HYST_BPS)) / 10_000;
-        require(denAdj <= type(uint128).max, "DEN_OVF");
-
         euint128 num = FHE.mul(FHE.asEuint128(pos[user].eCollat), uint128(LT_collat6));
         euint64 eMax = FHE.asEuint64(FHE.div(num, uint128(denAdj)));
 
-        // Headroom = max(0, eMaxAbs - eDebt)
+        // Headroom = max(0, eMax - eDebt)
         ebool underflow = FHE.gt(pos[user].eDebt, eMax);
         euint64 headroom = FHE.select(underflow, FHE.asEuint64(0), FHE.sub(eMax, pos[user].eDebt));
 
@@ -598,9 +611,9 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
 
         // t (1e6) = B * price * idxRatio / 1e12  → debt side scaled to 1e6
         uint256 t = (((uint256(p.B) * uint256(price)) / 1_000_000) * idxRatio6) / 1_000_000;
-        // Minimal A needed with LT and hysteresis
-        uint256 A_min = (t * uint256(LT_collat6) * 10_000) / (10_000 + HYST_BPS);
 
+        // Minimal A needed with LT and hysteresis
+        uint256 A_min = _ceilDivMul(t * uint256(LT_collat6) * 10_000, 1, 10_000 + HYST_BPS);
         uint256 excess = (p.A > A_min) ? (p.A - A_min) : 0;
 
         euint128 eExcess = FHE.asEuint128(uint128(excess));
