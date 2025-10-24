@@ -47,6 +47,7 @@ describe("OBOL Tests", function () {
     expect(await oracleInstance.getAddress()).to.be.properAddress;
 
     //let's say our current cammPair reserves (USD-EUR) are 100k - 90k with USD = token0
+    //1111111 -> 1.11
     const fakePriceEURUSD = (BigInt(100_000) * this.decimals) / BigInt(90_000);
 
     const setPriceTx = await oracleInstance.setPrice(fakePriceEURUSD, 1);
@@ -55,7 +56,7 @@ describe("OBOL Tests", function () {
 
     const priceFromOracle = await oracleInstance.price6();
 
-    log_str = "Fake price : " + ethers.formatUnits(priceFromOracle.toString(), 6) + " USD for 1 EUR.";
+    log_str = "Fake price : " + ethers.formatUnits(priceFromOracle.toString(), 6) + " USD per 1 EUR (USD/EUR).";
     log(log_str, "deploy oracle");
   });
 
@@ -965,7 +966,8 @@ async function computeHealthFactor(
   const borrowIndex6: bigint = await market.borrowIndex6();
   const LT = await market.LT_collat6();
 
-  const rawPrice6: bigint = await oracle.price6();
+  // price6 must be "collat per debt unit"
+  const rawPrice6: bigint = await oracle.price6(); // USD/EUR (1e6)
   const direction: bigint = await market.direction();
   const price6: bigint =
     direction === 0n
