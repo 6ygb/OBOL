@@ -487,6 +487,23 @@ describe("OBOL Tests", function () {
     log(log_str, "borrow asset");
   });
 
+  it("Should retrieve active borrowers list", async function () {
+    const market1 = this.market1; //EUR collat -> USD borrowed
+    const market2 = this.market2; //USD collat -> EUR borrowed
+
+    const aBorm1 = await market1.totalActiveBorrowers();
+    const aBorm2 = await market2.totalActiveBorrowers();
+
+    log_str = `Active borrowers on Market 1 : ${aBorm1}, Markent 2 : ${aBorm2}`;
+    log(log_str, "retrieve active borrowers");
+
+    const blist1 = await market1.getActiveBorrowers(0, aBorm1);
+    const blist2 = await market2.getActiveBorrowers(0, aBorm2);
+
+    log_str = `Active borrowers addresses on Market 1 : ${blist1}, Markent 2 : ${blist2}`;
+    log(log_str, "retrieve active borrowers");
+  });
+
   it("Should repay part of the debt on markets", async function () {
     const token1 = this.token1; //USD
     const token2 = this.token2; //EUR
@@ -682,6 +699,9 @@ describe("OBOL Tests", function () {
       ].join("\n"),
       "liq scenario",
     );
+
+    const liqPosList = await market1.getLiquidatableSlice(0, 10);
+    log(`Liquidatable users list (from contract) : [[${liqPosList}]]`, "liq scenario");
 
     const liqBal1Before = await fhevm.userDecryptEuint(
       FhevmType.euint64,
