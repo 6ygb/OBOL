@@ -868,3 +868,93 @@ task("obol:update_indexes", "Accrue indices on both markets").setAction(async (_
   if (!rc?.status) throw new Error("updateIndexes m2 failed");
   console.log("Indexes accrued on both markets.");
 });
+
+task("obol:active_count", "Show number of active borrowers on a market")
+  .addParam("market", "EURtoUSD | USDtoEUR", undefined, types.string)
+  .setAction(async (args, hre) => {
+    const which = String(args.market) as "EURtoUSD" | "USDtoEUR";
+    const mkt = await getMarket(hre, which);
+    const n: bigint = await mkt.totalActiveBorrowers();
+    console.log(`Active borrowers on ${which} (${await mkt.getAddress()}): ${n.toString()}`);
+  });
+
+task("obol:active_list", "List a page of active borrowers (addresses) on a market")
+  .addParam("market", "EURtoUSD | USDtoEUR", undefined, types.string)
+  .addOptionalParam("offset", "Start index (default 0)", 0, types.int)
+  .addOptionalParam("limit", "Max results (default 50)", 50, types.int)
+  .addFlag("json", "Print JSON instead of lines")
+  .setAction(async (args, hre) => {
+    const which = String(args.market) as "EURtoUSD" | "USDtoEUR";
+    const offset = Number(args.offset ?? 0);
+    const limit = Number(args.limit ?? 50);
+    const mkt = await getMarket(hre, which);
+
+    const total: bigint = await mkt.totalActiveBorrowers();
+    const list: string[] = await mkt.getActiveBorrowers(offset, limit);
+
+    if (args.json) {
+      console.log(
+        JSON.stringify(
+          {
+            market: which,
+            marketAddress: await mkt.getAddress(),
+            total: total.toString(),
+            offset,
+            limit: list.length,
+            borrowers: list,
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
+    console.log(
+      `Active borrowers on ${which} (${await mkt.getAddress()}) total=${total.toString()} | showing ${list.length} from offset=${offset}`,
+    );
+    list.forEach((addr, i) => console.log(`${offset + i}: ${addr}`));
+  });
+
+task("obol:liquidatable", "Get a page of active borrowers and whether each is liquidatable")
+  .addParam("market", "EURtoUSD | USDtoEUR", undefined, types.string)
+  .addOptionalParam("offset", "Start index (default 0)", 0, types.int)
+  .addOptionalParam("limit", "Max results (default 50)", 50, types.int)
+  .addFlag("onlytrue", "Only print addresses currently liquidatable")
+  .addFlag("json", "Print JSON instead of lines")
+  .setAction(async (args, hre) => {
+    const which = String(args.market) as "EURtoUSD" | "USDtoEUR";
+    const offset = Number(args.offset ?? 0);
+    const limit = Number(args.limit ?? 50);
+    const mkt = await getMarket(hre, which);
+
+    const total: bigint = await mkt.totalActiveBorrowers();
+    const [addrs, flags]: [string[], boolean[]] = await mkt.getLiquidatableSlice(offset, limit);
+
+    if (args.json) {
+      const rows = addrs.map((a, i) => ({ address: a, liquidatable: flags[i] }));
+      console.log(
+        JSON.stringify(
+          {
+            market: which,
+            marketAddress: await mkt.getAddress(),
+            total: total.toString(),
+            offset,
+            limit: addrs.length,
+            results: args.onlytrue ? rows.filter((r) => r.liquidatable) : rows,
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
+    console.log(
+      `Liquidatable slice on ${which} (${await mkt.getAddress()}) total=${total.toString()} | showing ${addrs.length} from offset=${offset}`,
+    );
+    for (let i = 0; i < addrs.length; i++) {
+      if (args.onlytrue && !flags[i]) continue;
+      console.log(`${offset + i}: ${addrs[i]}  | liquidatable=${flags[i]}`);
+    }
+  });
