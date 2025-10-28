@@ -6,20 +6,21 @@ import {SepoliaConfig} from "@fhevm/solidity/config/ZamaConfig.sol";
 import {IERC7984} from "./OZ-confidential-contracts-fork/IERC7984.sol";
 import {ERC7984} from "./OZ-confidential-contracts-fork/ERC7984.sol";
 import {ObolPriceOracle} from "./ObolPriceOracle.sol";
+import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 contract ConfLendMarket is SepoliaConfig, ERC7984 {
     enum Direction {
         EURtoUSD,
         USDtoEUR
-    } // which asset is debt?
+    } //which asset is debt?
 
     struct UserPos {
         euint64 eCollat;
         euint64 eDebt;
-        uint256 A; // secret * collat * LT
-        uint256 B; // secret * debt principal
-        uint64 posEpoch; // bumps each time A/B recomputed
-        uint128 userBorrowIndex6; // snapshot when last touched
+        uint256 A; //secret * collat * LT
+        uint256 B; //secret * debt principal
+        uint64 posEpoch; //bumps each time A/B recomputed
+        uint128 userBorrowIndex6; //snapshot when last touched
         euint32 secret;
         bool updatePending;
         euint64 maxBorrow;
@@ -30,7 +31,7 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
         bool exists;
     }
 
-    // ---------- Immutable config ----------
+    //Immutable vars
     Direction public immutable direction;
     IERC7984 public immutable collatToken;
     IERC7984 public immutable debtToken;
@@ -57,13 +58,16 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
     uint64 private constant RESERVE_MIN6 = 1_000 * 1_000_000;
     bool private bootstrapDone;
 
-    // ---------- State ----------
+    using EnumerableSet for EnumerableSet.AddressSet;
+    EnumerableSet.AddressSet private _activeBorrowers;
+
+    //State mappings
     mapping(address => UserPos) public pos;
     mapping(uint256 => address) private factorDecBundle;
     mapping(address => mapping(address => PendingLiqStruct)) private pendingLiquidations;
+    mapping(address => bool) public hasOpenDebt;
 
-    // ---------- Events ----------
-
+    //Events
     event RatesUpdated(uint64 brPerSec6, uint64 srPerSec6);
     event Accrued(uint128 borrowIndex6, uint128 supplyIndex6);
     event marketFactorsRefreshed(address indexed user, uint256 requestID, uint256 blockNumber, uint256 A, uint256 B);
@@ -71,7 +75,6 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
     event LiquidationQueued(address indexed user, address indexed liquidator, uint256 blockNumber);
     event LiquidationClaimed(address indexed user, address indexed liquidator, uint256 blockNumber);
 
-    // ---------- Modifiers ----------
     /**
      * @dev Restricts access to the {rateRelayer}.
      */
@@ -143,6 +146,70 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
         unchecked {
             return (a * b + (c - 1)) / c;
         }
+    }
+
+    /**
+     * @dev Returns the current number of addresses tracked as having open debt.
+     *      Wrapper over {_activeBorrowers.length()} to help clients paginate.
+     * @return count Number of active borrower addresses.
+     *
+     * @notice O(1). The set ordering is not guaranteed and may change as members are added/removed.
+     */
+    function totalActiveBorrowers() external view returns (uint256) {
+        return _activeBorrowers.length();
+    }
+
+    /**
+     * @dev Returns a paginated slice of active borrower addresses.
+     *      If `offset >= totalActiveBorrowers()` or `limit == 0`, returns an empty array.
+     *      Uses the iteration order of {EnumerableSet}, which is not guaranteed to be stable.
+     *
+     * @param offset Starting index into the active-borrowers set snapshot.
+     * @param limit  Maximum number of addresses to return.
+     * @return out   An array of addresses with length `min(limit, n - offset)` (or zero if out of range).
+     *
+     * @notice O(limit). The returned view is a snapshot at call time and can get stale immediately after.
+     */
+    function getActiveBorrowers(uint256 offset, uint256 limit) external view returns (address[] memory) {
+        uint256 n = _activeBorrowers.length();
+
+        if (limit == 0 || offset >= n) {
+            limit = 0;
+        } else {
+            uint256 remaining = n - offset;
+            if (limit > remaining) limit = remaining;
+        }
+
+        address[] memory out = new address[](limit);
+        for (uint256 i; i < limit; i++) {
+            out[i] = _activeBorrowers.at(offset + i);
+        }
+
+        return out;
+    }
+
+    /**
+     * @dev Returns a paginated slice of active borrowers together with their current
+     *      public liquidatability status, as computed by {isLiquidatablePublic}.
+     *
+     * @param offset Starting index into the active-borrowers set snapshot.
+     * @param limit  Maximum number of addresses to check.
+     * @return addrs Array of borrower addresses.
+     * @return isLiq Array of flags aligned with `addrs` where `true` means liquidatable.
+     *
+     * @notice O(limit). Results are based on a snapshot at call time and may be stale
+     *         by the time a liquidation is attempted on-chain.
+     */
+    function getLiquidatableSlice(
+        uint256 offset,
+        uint256 limit
+    ) external view returns (address[] memory addrs, bool[] memory isLiq) {
+        address[] memory slice = this.getActiveBorrowers(offset, limit);
+        bool[] memory flags = new bool[](slice.length);
+        for (uint256 i = 0; i < slice.length; i++) {
+            flags[i] = isLiquidatablePublic(slice[i]);
+        }
+        return (slice, flags);
     }
 
     /**
@@ -219,7 +286,6 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
         }
     }
 
-    // ---------- Rate accrual (public scalars) ----------
     /**
      * @notice Update per-year APRs (1e6 scale) used for index accrual.
      * @param brPerSec6 Borrow APR per second (1e6)
@@ -396,6 +462,17 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
         pos[user].A = uAFactor;
         pos[user].B = uint256(uBFactor);
         pos[user].updatePending = false;
+
+        bool open = (pos[user].B != 0);
+        bool listed = _activeBorrowers.contains(user);
+
+        if (open && !listed) {
+            _activeBorrowers.add(user);
+            hasOpenDebt[user] = true;
+        } else if (!open && listed) {
+            _activeBorrowers.remove(user);
+            hasOpenDebt[user] = false;
+        }
 
         emit marketFactorsRefreshed(user, requestID, block.number, pos[user].A, pos[user].B);
     }
@@ -674,6 +751,11 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
 
         FHE.allowThis(pos[user].eDebt);
         FHE.allow(pos[user].eDebt, user);
+
+        if (!_activeBorrowers.contains(user)) {
+            _activeBorrowers.add(user);
+            hasOpenDebt[user] = true;
+        }
 
         refreshMarketFactors(user);
     }
