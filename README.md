@@ -8,6 +8,57 @@ Borrowing and liquidations are driven by **public static factors** and a **publi
 
 ---
 
+## CAMM dependency
+> ⚠️ To work, OBOL relies on CAMM
+
+<br> 
+OBOL gets its price data from CAMM (Confidential AMM), using an oracle and a relayer.
+<br> 
+CAMM repo : https://github.com/6ygb/CAMM
+<br>
+Oracle relayer : https://github.com/6ygb/CAMM-OBOL-RELAYER
+
+## Test it !
+> ⚠️ **Please read the docs first** ⚠️
+
+<br> 
+Front-end POC with test contracts at : https://obol.6ygb.dev <br> <br>
+Deployed on Sepolia :
+
+- EUR to USD Market (https://sepolia.etherscan.io/address/0xD8477fB81e1aEA14B06b3f55bE3B7d4124BfC8F3#code) :
+
+  ```
+  0xD8477fB81e1aEA14B06b3f55bE3B7d4124BfC8F3
+  ```
+
+- USD to EUR Market (https://sepolia.etherscan.io/address/0x23715BBb2b02cB8c66eBfd982FeA922433622dbF#code) :
+
+  ```
+  0x23715BBb2b02cB8c66eBfd982FeA922433622dbF
+  ```
+
+- USD Token (https://sepolia.etherscan.io/address/0x066E08fabeaB12965F5aD467bbBf6954B73B9d27#code) :
+
+  ```
+  0x066E08fabeaB12965F5aD467bbBf6954B73B9d27
+  ```
+- EUR Token (https://sepolia.etherscan.io/address/0x60B5d3BFca0E45B65D5F0C1Ce15DB06f45c7AD5F#code) :
+
+  ```
+  0x60B5d3BFca0E45B65D5F0C1Ce15DB06f45c7AD5F
+  ```
+- Oracle (https://sepolia.etherscan.io/address/0xa7a7AF22A88C5dc519A7811c0c5604dce692BA65#code) :
+
+  ```
+  0xa7a7AF22A88C5dc519A7811c0c5604dce692BA65
+  ```
+
+<br>
+Front end repo available at https://github.com/6ygb/OBOL-front
+
+---
+
+
 ## Table of Contents
 
 - [Design Overview](#design-overview)
