@@ -1,3 +1,6 @@
+<p align="center">
+  <img src="https://github.com/6ygb/OBOL-front/blob/main/public/ObolLogo.svg" width="100px" height="100px"/>
+</p>
 
 # Obol - Confidential lending protocol
 
