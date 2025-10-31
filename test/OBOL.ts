@@ -935,6 +935,71 @@ describe("OBOL Tests", function () {
 
     await redeemAllAndAssert(market1, tokenUSD, shares1, supIdx1, "oUSD");
     await redeemAllAndAssert(market2, tokenEUR, shares2, supIdx2, "oEUR");
+    await fhevm.awaitDecryptionOracle();
+  });
+
+  it("Allows full collateral removal after full repayment (no-debt fast path)", async function () {
+    const market = this.market1; // EUR collat -> USD debt
+    const debtToken = this.token1; // USD
+    const collatToken = this.token2; // EUR
+    const signer = this.signers[0];
+
+    const blk = await this.provider.getBlock("latest");
+    const exp = blk.timestamp + 100000000;
+    await (await debtToken.setOperator(await market.getAddress(), exp)).wait();
+    await (await collatToken.setOperator(await market.getAddress(), exp)).wait();
+
+    const posBefore = await market.pos(signer.address);
+    const eDebtBefore = posBefore[1];
+    const debtBefore = await fhevm.userDecryptEuint(FhevmType.euint64, eDebtBefore, await market.getAddress(), signer);
+
+    log(`Debt before removing all collat : ${ethers.formatUnits(debtBefore, 6)}`, "remove all collat");
+
+    //repay all debt
+    const repIn = fhevm.createEncryptedInput(await market.getAddress(), signer.address);
+    const eRep = await repIn.add64(debtBefore).encrypt();
+    const ev1 = pollSpecificEvent(market, "marketFactorsRefreshed", "repay-all refresh");
+    await (await market["repay(bytes32,bytes)"](eRep.handles[0], eRep.inputProof)).wait();
+    await fhevm.awaitDecryptionOracle();
+    await ev1;
+
+    //Confirm B == 0 (no public debt) and encrypted debt is zero
+    const posMid = await market.pos(signer.address);
+    const eDebtMid = posMid[1];
+    const Bmid = posMid[3];
+    const debtMid = await fhevm.userDecryptEuint(FhevmType.euint64, eDebtMid, await market.getAddress(), signer);
+
+    expect(Bmid).to.equal(0n);
+    expect(debtMid).to.equal(0n);
+
+    log(`Debt is now : ${ethers.formatUnits(debtMid, 6)}`, "remove all collat");
+
+    //Remove ALL collateral
+    const posNow = await market.pos(signer.address);
+    const eCollatNow = posNow[0];
+    const collatNow = await fhevm.userDecryptEuint(FhevmType.euint64, eCollatNow, await market.getAddress(), signer);
+    log(`Collat balance before removing all : ${ethers.formatUnits(collatNow, 6)}`, "remove all collat");
+    expect(collatNow > 0n).to.equal(true, "Need some collateral to remove");
+
+    const remIn = fhevm.createEncryptedInput(await market.getAddress(), signer.address);
+    const eRem = await remIn.add64(collatNow).encrypt(); // request all
+    const ev2 = pollSpecificEvent(market, "marketFactorsRefreshed", "remove all collat");
+    await (await market["removeCollateral(bytes32,bytes)"](eRem.handles[0], eRem.inputProof)).wait();
+
+    await fhevm.awaitDecryptionOracle();
+    await ev2;
+
+    const posAfter = await market.pos(signer.address);
+    const eCollatAfter = posAfter[0];
+    const collatAfter = await fhevm.userDecryptEuint(
+      FhevmType.euint64,
+      eCollatAfter,
+      await market.getAddress(),
+      signer,
+    );
+
+    log(`Collat balance after removing all : ${ethers.formatUnits(collatAfter, 6)}`, "remove all collat");
+    expect(collatAfter).to.equal(0n)
   });
 
   it("Accrues indices exactly per formula and emits Accrued", async function () {
