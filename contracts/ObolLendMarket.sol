@@ -679,6 +679,22 @@ contract ConfLendMarket is SepoliaConfig, ERC7984 {
      */
     function _removeCollateral(address user, euint64 collatAmount) internal fresh userPosUTD(user) {
         UserPos storage p = pos[user];
+
+        if (p.B == 0) {
+            ebool overReq = FHE.gt(collatAmount, p.eCollat);
+            euint64 safeAmount_ = FHE.select(overReq, p.eCollat, collatAmount);
+
+            FHE.allowTransient(safeAmount_, collatTokenAddress);
+            euint64 sentAmount_ = _transferTokensFromMarket(user, safeAmount_, address(collatToken));
+
+            p.eCollat = FHE.sub(p.eCollat, sentAmount_);
+            FHE.allowThis(p.eCollat);
+            FHE.allow(p.eCollat, user);
+
+            refreshMarketFactors(user);
+            return;
+        }
+        
         uint128 price = _getPrice();
 
         // compute public right hand side (RHS) pieces for the safety threshold
