@@ -28,16 +28,16 @@ Oracle relayer : https://github.com/6ygb/CAMM-OBOL-RELAYER
 Front-end POC with test contracts at : https://obol.6ygb.dev <br> <br>
 Deployed on Sepolia :
 
-- EUR to USD Market (https://sepolia.etherscan.io/address/0xD8477fB81e1aEA14B06b3f55bE3B7d4124BfC8F3#code) :
+- EUR to USD Market (https://sepolia.etherscan.io/address/0x7Ca52270cA3F7bcAd11ddEa2BEF19dA246991Bac#code) :
 
   ```
-  0xD8477fB81e1aEA14B06b3f55bE3B7d4124BfC8F3
+  0x7Ca52270cA3F7bcAd11ddEa2BEF19dA246991Bac
   ```
 
-- USD to EUR Market (https://sepolia.etherscan.io/address/0x23715BBb2b02cB8c66eBfd982FeA922433622dbF#code) :
+- USD to EUR Market (https://sepolia.etherscan.io/address/0x9749421BF36CA88FbB5Ae5Ca33d4d9E7B3665865#code) :
 
   ```
-  0x23715BBb2b02cB8c66eBfd982FeA922433622dbF
+  0x9749421BF36CA88FbB5Ae5Ca33d4d9E7B3665865
   ```
 
 - USD Token (https://sepolia.etherscan.io/address/0x066E08fabeaB12965F5aD467bbBf6954B73B9d27#code) :
