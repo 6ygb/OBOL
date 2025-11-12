@@ -9,6 +9,9 @@ Borrowing and liquidations are driven by **public static factors** and a **publi
 
 > Built on Zama’s [fhEVM](https://github.com/zama-ai/fhevm). This document explains how the provided `ConfLendMarket` contract works, field‑by‑field and function‑by‑function, with 6‑decimals math throughout.
 
+
+<p align=center>:star2: Winner of Zama's October 2025 builder program :star2:</p>
+
 ---
 
 ## CAMM dependency
